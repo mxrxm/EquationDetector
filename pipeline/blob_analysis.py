@@ -39,6 +39,7 @@ Region schema
 
 from collections import deque
 
+<<<<<<< Updated upstream
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # STAGE 3 — Connected Component Analysis (BFS, 8-connected)
@@ -389,3 +390,66 @@ def run_blob_analysis(binary, min_blob_area=5, max_blob_area_ratio=0.05,
         "font_size": font_size,
         "regions":   regions,
     }
+=======
+def find_all_blobs(binary_image, min_blob_area=5):
+    """Find all connected components (blobs) in a binary image."""
+
+    h, w    = len(binary_image), len(binary_image[0])
+    visited = [[False] * w for _ in range(h)]
+    blobs   = []
+
+    def bfs(start_r, start_c):
+        queue   = [(start_r, start_c)]
+        visited[start_r][start_c] = True
+        pixels  = []
+        while queue:
+            r, c = queue.pop(0)
+            pixels.append((r, c))
+            for dr in [-1, 0, 1]:
+                for dc in [-1, 0, 1]:
+                    if dr == 0 and dc == 0:
+                        continue
+                    nr, nc = r + dr, c + dc
+                    if (0 <= nr < h and 0 <= nc < w
+                            and not visited[nr][nc]
+                            and binary_image[nr][nc] == 1):
+                        visited[nr][nc] = True
+                        queue.append((nr, nc))
+        return pixels
+
+    for r in range(h):
+        for c in range(w):
+            if binary_image[r][c] == 1 and not visited[r][c]:
+                pixels = bfs(r, c)
+                if len(pixels) < min_blob_area:
+                    continue
+                rows = [p[0] for p in pixels]
+                cols = [p[1] for p in pixels]
+                y1, y2 = min(rows), max(rows)
+                x1, x2 = min(cols), max(cols)
+                bh = y2 - y1 + 1
+                bw = x2 - x1 + 1
+                blobs.append({
+                    "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+                    "height":       bh,
+                    "width":        bw,
+                    "area":         len(pixels),
+                    "aspect_ratio": bw / bh if bh > 0 else 0,
+                    "center_r":     (y1 + y2) / 2,
+                    "center_c":     (x1 + x2) / 2,
+                })
+
+    print(f"  Total blobs found: {len(blobs)}")
+    return blobs
+
+def estimate_font_size(blobs):
+    """Estimate font size from blob properties."""
+    if not blobs:
+        return 20
+    hist = {}
+    for b in blobs:
+        hist[b["height"]] = hist.get(b["height"], 0) + 1
+    font_size = max(hist, key=hist.get)
+    print(f"  Estimated font size: {font_size}px")
+    return font_size
+>>>>>>> Stashed changes
