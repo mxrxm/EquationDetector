@@ -1,7 +1,7 @@
 """Export utilities: save_stage6, CSV writer."""
 
 
-def save_stage6(results, output_path):
+def save_output(results, output_path):
     """Save stage 6 results to file."""
     pass
 
