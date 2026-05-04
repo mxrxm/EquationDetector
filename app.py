@@ -256,9 +256,71 @@ with st.sidebar:
     class1_threshold = st.slider(
         "Inline confidence threshold",
         min_value=0.0, max_value=1.0,
-        value=0.5, step=0.05,
+        value=0.25, step=0.05,
         help="Class 1 (inline) boxes are only shown above this confidence"
     )
+
+    with st.expander("Inline detection tuning"):
+        inline_score_threshold = st.slider(
+            "Inline score threshold",
+            min_value=2.0, max_value=6.0,
+            value=4.2, step=0.1,
+            help="Minimum raw cluster score before baseline comparison"
+        )
+        inline_delta_threshold = st.slider(
+            "Inline baseline delta",
+            min_value=3.0, max_value=8.0,
+            value=6.0, step=0.1,
+            help="How far above line baseline a cluster must score"
+        )
+        inline_gap_factor = st.slider(
+            "Inline cluster gap factor",
+            min_value=0.7, max_value=1.3,
+            value=1.0, step=0.05,
+            help="Larger merges more symbols into a cluster"
+        )
+        inline_max_cluster_size = st.slider(
+            "Inline max cluster size",
+            min_value=12, max_value=40,
+            value=28, step=2,
+            help="Reject clusters larger than this blob count"
+        )
+        inline_sentence_min_n = st.slider(
+            "Inline sentence min blobs",
+            min_value=8, max_value=24,
+            value=12, step=1,
+            help="Reject long text-like clusters at or above this blob count"
+        )
+        inline_tiny_height_ratio = st.slider(
+            "Inline tiny height ratio",
+            min_value=0.30, max_value=0.55,
+            value=0.42, step=0.01,
+            help="Blobs below this height (relative to font) count as tiny"
+        )
+        inline_frac_width_ratio = st.slider(
+            "Inline fraction width ratio",
+            min_value=0.9, max_value=2.0,
+            value=1.2, step=0.05,
+            help="Blob width (relative to font) to count as fraction bar"
+        )
+        inline_frac_height_ratio = st.slider(
+            "Inline fraction height ratio",
+            min_value=0.08, max_value=0.25,
+            value=0.15, step=0.01,
+            help="Blob height (relative to font) to count as fraction bar"
+        )
+        inline_tall_height_ratio = st.slider(
+            "Inline tall height ratio",
+            min_value=1.4, max_value=2.6,
+            value=1.9, step=0.05,
+            help="Blob height (relative to font) to count as tall symbol"
+        )
+        inline_baseline_max = st.slider(
+            "Inline baseline max",
+            min_value=0.5, max_value=2.5,
+            value=1.5, step=0.1,
+            help="Higher allows equations in noisier text lines"
+        )
 
     debug_mode = st.checkbox(
         "Debug mode", value=False,
@@ -314,7 +376,14 @@ if run_cca_pipeline is None:
 
 # Cache results in session_state keyed by (filename, size, detector_mode)
 # so changing the slider does NOT re-run the pipeline
-_cache_key = f"{uploaded.name}_{uploaded.size}_{detector_mode}"
+_cache_key = (
+    f"{uploaded.name}_{uploaded.size}_{detector_mode}_"
+    f"{inline_score_threshold}_{inline_delta_threshold}_"
+    f"{inline_gap_factor}_{inline_max_cluster_size}_"
+    f"{inline_sentence_min_n}_{inline_tiny_height_ratio}_"
+    f"{inline_frac_width_ratio}_{inline_frac_height_ratio}_"
+    f"{inline_tall_height_ratio}_{inline_baseline_max}"
+)
 
 if st.session_state.get("_cache_key") != _cache_key:
     suffix = os.path.splitext(uploaded.name)[1] or ".png"
@@ -327,6 +396,16 @@ if st.session_state.get("_cache_key") != _cache_key:
             gray, binary, blobs, font_size, text_boxes, eq_results = \
                 run_cca_pipeline(tmp_path,
                                  detector_mode=detector_mode,
+                                 inline_score_threshold=inline_score_threshold,
+                                 inline_delta_threshold=inline_delta_threshold,
+                                 inline_gap_factor=inline_gap_factor,
+                                 inline_max_cluster_size=inline_max_cluster_size,
+                                 inline_sentence_min_n=inline_sentence_min_n,
+                                 inline_tiny_height_ratio=inline_tiny_height_ratio,
+                                 inline_frac_width_ratio=inline_frac_width_ratio,
+                                 inline_frac_height_ratio=inline_frac_height_ratio,
+                                 inline_tall_height_ratio=inline_tall_height_ratio,
+                                 inline_baseline_max=inline_baseline_max,
                                  debug=debug_mode)
         except Exception as e:
             st.error(f"Pipeline error: {e}")
