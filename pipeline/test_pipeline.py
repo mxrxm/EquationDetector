@@ -33,7 +33,9 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, script_dir)
 
 from preprocessing import preprocess
-from blob_analysis  import run_blob_analysis
+from blob_analysis import run_blob_analysis
+import blob_analysis
+print("LOADED FROM:", blob_analysis.__file__)
 
 try:
     from PIL import Image, ImageDraw
