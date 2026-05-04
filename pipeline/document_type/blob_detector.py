@@ -30,10 +30,10 @@ class BlobDocumentTypeDetector(BaseDocumentTypeDetector):
     INK_DENSITY_DENSE    = 0.04
 
     # Body blob ratio: dense text ≈ 0.70–0.85, mixed ≈ 0.50–0.65
-    BODY_RATIO_DENSE     = 0.65
+    BODY_RATIO_DENSE     = 0.60
 
     # Blobs per estimated line: dense ≈ 30–60, sparse ≈ 10–25
-    BLOBS_PER_LINE_DENSE = 25
+    BLOBS_PER_LINE_DENSE = 20
 
     def detect(self, blobs, font_size, img_width, img_height,
                gray=None, debug=False):

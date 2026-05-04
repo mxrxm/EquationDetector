@@ -82,6 +82,16 @@ def _detect_doc_type(blobs, font_size, width, height, gray, mode, debug):
 
 def run_cca_pipeline(image_path,
                      detector_mode="combined",
+                     inline_score_threshold=3.5,
+                     inline_delta_threshold=5.0,
+                     inline_gap_factor=0.9,
+                     inline_max_cluster_size=24,
+                     inline_sentence_min_n=12,
+                     inline_tiny_height_ratio=0.42,
+                     inline_frac_width_ratio=1.2,
+                     inline_frac_height_ratio=0.15,
+                     inline_tall_height_ratio=1.9,
+                     inline_baseline_max=1.5,
                      debug=False):
     """
     Run the full equation-detection pipeline on one document image.
@@ -152,8 +162,16 @@ def run_cca_pipeline(image_path,
         eq_results_p2 = detect_inline_equations(
             text_regions_with_blobs,
             font_size,
-            score_threshold=3.5,
-            delta_threshold=5.0,
+            score_threshold=inline_score_threshold,
+            delta_threshold=inline_delta_threshold,
+            gap_factor=inline_gap_factor,
+            max_cluster_size=inline_max_cluster_size,
+            sentence_min_n=inline_sentence_min_n,
+            tiny_height_ratio=inline_tiny_height_ratio,
+            frac_width_ratio=inline_frac_width_ratio,
+            frac_height_ratio=inline_frac_height_ratio,
+            tall_height_ratio=inline_tall_height_ratio,
+            baseline_max=inline_baseline_max,
             debug=debug
         )
         print(f"      inline={len(eq_results_p2)}")

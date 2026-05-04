@@ -104,7 +104,12 @@ def split_line_into_word_clusters(line_blobs, font_size, gap_factor=0.9):
 # STEP 3 — Score a single cluster
 # ─────────────────────────────────────────
 
-def score_cluster_as_equation(cluster_blobs, font_size):
+def score_cluster_as_equation(cluster_blobs, font_size, max_cluster_size=24,
+                              sentence_min_n=12,
+                              tiny_height_ratio=0.42,
+                              frac_width_ratio=1.2,
+                              frac_height_ratio=0.15,
+                              tall_height_ratio=1.9):
     """
     Score a word cluster for equation likelihood.
 
@@ -130,12 +135,12 @@ def score_cluster_as_equation(cluster_blobs, font_size):
         return -10.0, False, {"reason": "too_small"}
 
     # ── Hard reject: cluster too large (full text line leaked through) ───
-    if n > 18:
+    if n > max_cluster_size * 1.5:
         return -10.0, False, {"reason": "too_large"}
 
     # ── Hard reject: cluster too narrow ──────────────────────────────────
     span = max(b["x2"] for b in cluster_blobs) - min(b["x1"] for b in cluster_blobs)
-    if span < font_size * 1.2:
+    if span < font_size * 0.9:
         return -10.0, False, {"reason": "too_narrow"}
 
     # ── Compute features ─────────────────────────────────────────────────
@@ -150,21 +155,21 @@ def score_cluster_as_equation(cluster_blobs, font_size):
     h_ratio    = mean_h / font_size   # mean blob height relative to font
 
     # Fraction bar: very wide AND very flat
-    # Threshold tightened: height must be <= 15% of font (was 18%)
+    # Thresholds tuned by frac_width_ratio and frac_height_ratio
     has_frac = any(
-        b["width"]  > font_size * 1.2 and
-        b["height"] <= max(2, font_size * 0.15)
+        b["width"]  > font_size * frac_width_ratio and
+        b["height"] <= max(2, font_size * frac_height_ratio)
         for b in cluster_blobs
     )
 
     # Tall symbols: integral signs, tall brackets, summation
-    # Threshold raised to 1.9× (was 1.8×) to avoid capital letters
-    tall_count = sum(1 for b in cluster_blobs if b["height"] > font_size * 1.9)
+    # Threshold tuned by tall_height_ratio
+    tall_count = sum(1 for b in cluster_blobs if b["height"] > font_size * tall_height_ratio)
     tall_ratio = tall_count / n
 
     # Tiny symbols: superscripts, subscripts, dots in equations
-    # Threshold lowered to 0.42× (was 0.40×) for robustness
-    tiny_count = sum(1 for b in cluster_blobs if b["height"] < font_size * 0.42)
+    # Threshold tuned by tiny_height_ratio
+    tiny_count = sum(1 for b in cluster_blobs if b["height"] < font_size * tiny_height_ratio)
     tiny_ratio = tiny_count / n
 
     # Vertical spread of blob centers — equations have blobs at different heights
@@ -181,11 +186,41 @@ def score_cluster_as_equation(cluster_blobs, font_size):
         if b["width"] > font_size * 0.8 and b["height"] < font_size * 0.35
     )
 
+    # Operator-like shapes (very wide or very tall/skinny)
+    operatorish = sum(
+        1 for b in cluster_blobs
+        if b["aspect_ratio"] > 2.2 or b["aspect_ratio"] < 0.35
+    )
+
     # ── Hard reject: overwhelmingly body-height blobs ─────────────────
     # If >85% of blobs are normal letter height and no fraction bar or
     # tall/tiny symbols, this is definitely text — don't score it
     if body_ratio > 0.85 and not has_frac and tall_count == 0 and tiny_count == 0:
         return -10.0, False, {"reason": "all_body_height"}
+
+    # Text-like cluster guard (single words / short phrases)
+    texty = (
+        body_ratio > 0.76 and cv_h < 0.30 and cv_ar < 0.60 and v_spread < 0.9
+        and tall_count == 0 and tiny_count == 0 and not has_frac
+        and operatorish == 0 and wide_flat == 0
+    )
+    if texty:
+        return -10.0, False, {"reason": "texty"}
+
+    # Weak text-like guard: allow dots on letters but still reject phrases
+    if (body_ratio > 0.72 and tall_count == 0 and not has_frac and
+            tiny_count <= 1 and operatorish < 2 and wide_flat == 0 and v_spread < 0.9):
+        return -10.0, False, {"reason": "texty_weak"}
+
+    # Large clusters that still look like plain text (avoid full-line leaks)
+    if (n > 18 and body_ratio > 0.82 and not has_frac and
+            tall_count == 0 and tiny_count == 0 and v_spread < 0.6):
+        return -10.0, False, {"reason": "large_texty"}
+
+    # Sentence-like guard: many blobs, mostly body height, low math structure
+    if (n >= sentence_min_n and body_ratio > 0.72 and not has_frac and tall_count == 0 and
+            operatorish == 0 and tiny_count <= 1 and v_spread < 0.8):
+        return -10.0, False, {"reason": "sentence_text"}
 
     # ── has_strong: requires at least one unambiguous math feature ────────
     # Relaxed slightly from original to catch research paper inline equations:
@@ -199,7 +234,15 @@ def score_cluster_as_equation(cluster_blobs, font_size):
         or (tall_count >= 1 and tiny_count >= 2)
         or (tall_count >= 1 and tiny_count >= 1 and v_spread > 1.0)
         or (wide_flat >= 2 and (tall_count >= 1 or tiny_count >= 1))
+        or (operatorish >= 2 and (tiny_count >= 2 or v_spread > 0.8))
     )
+
+    # Allow larger clusters only if they show strong math structure
+    if n > max_cluster_size:
+        if not (has_frac or (tiny_count >= 3 and v_spread > 0.9) or
+                (tall_count >= 1 and tiny_count >= 1) or
+                (operatorish >= 2 and tiny_count >= 1)):
+            return -10.0, False, {"reason": "too_large"}
 
     # ── Scoring ───────────────────────────────────────────────────────────
     score = 0.0
@@ -209,12 +252,15 @@ def score_cluster_as_equation(cluster_blobs, font_size):
     elif tall_ratio > 0.05:     score += 1.5
     if tiny_ratio > 0.10:       score += 2.0
     elif tiny_ratio > 0.05:     score += 1.0
+    if tiny_count >= 2 and v_spread > 0.8:
+        score += 1.2
     if cv_h > 0.50:             score += 1.5
     if cv_h > 0.80:             score += 1.5   # additional for very high variance
     if cv_ar > 0.60:            score += 0.5
     if h_ratio > 1.35:          score += 1.0   # mean height above font line
     if v_spread > 0.8:          score += 0.5
     if wide_flat >= 1:          score += 0.5   # minus signs etc.
+    if operatorish >= 2:        score += 0.8
 
     # ── Penalties ─────────────────────────────────────────────────────────
     # Very uniform heights with nothing special = text
@@ -224,11 +270,23 @@ def score_cluster_as_equation(cluster_blobs, font_size):
     if tall_count == 0 and tiny_count == 0 and not has_frac:
         score -= 2.5
     # Mostly body-height (but not caught by hard reject above)
-    if body_ratio > 0.70 and not has_frac:
+    if body_ratio > 0.70 and not has_frac and tiny_count == 0:
         score -= 2.0
+    
+    # Heavy penalty for words disguised as math (like "(Efficiency):")
+    # i.e., >50% normal letters, no math operators, no sub/superscript jumping
+    mid_count = n - tall_count - tiny_count
+    if (mid_count / n) > 0.48 and v_spread < 0.85 and wide_flat == 0 and not has_frac and tiny_count <= 1:
+        score -= 6.0
+        
     # Very small cluster with low variance = single word, not equation
-    if n <= 4 and cv_h < 0.20 and not has_frac:
+    if n <= 4 and cv_h < 0.20 and not has_frac and operatorish == 0:
         score -= 3.0
+
+    # Text-like short word guard: uniform shapes, low vertical spread
+    if (n <= 6 and v_spread < 0.6 and cv_h < 0.25 and cv_ar < 0.45 and
+            tall_count == 0 and tiny_count == 0 and not has_frac and operatorish == 0):
+        return -10.0, False, {"reason": "short_text"}
 
     signals = {
         "n":           n,
@@ -241,7 +299,9 @@ def score_cluster_as_equation(cluster_blobs, font_size):
         "v_spread":    round(v_spread, 3),
         "body_ratio":  round(body_ratio, 3),
         "wide_flat":   wide_flat,
+        "operatorish": operatorish,
         "span_px":     span,
+        "texty":       texty,
     }
 
     return score, has_strong, signals
@@ -254,6 +314,14 @@ def score_cluster_as_equation(cluster_blobs, font_size):
 def detect_inline_equations(text_regions, font_size,
                              score_threshold=3.5,
                              delta_threshold=5.0,
+                             gap_factor=0.9,
+                             max_cluster_size=24,
+                             sentence_min_n=12,
+                             tiny_height_ratio=0.42,
+                             frac_width_ratio=1.2,
+                             frac_height_ratio=0.15,
+                             tall_height_ratio=1.9,
+                             baseline_max=1.5,
                              debug=False):
     """
     Pass 2: word-cluster level inline equation detection.
@@ -291,7 +359,7 @@ def detect_inline_equations(text_regions, font_size,
                 continue
 
             clusters = split_line_into_word_clusters(
-                line_blobs, font_size, gap_factor=0.9
+                line_blobs, font_size, gap_factor=gap_factor
             )
 
             # Score every cluster on this line
@@ -300,7 +368,16 @@ def detect_inline_equations(text_regions, font_size,
             cluster_strongs = []
 
             for cluster in clusters:
-                s, strong, sigs = score_cluster_as_equation(cluster, font_size)
+                s, strong, sigs = score_cluster_as_equation(
+                    cluster,
+                    font_size,
+                    max_cluster_size=max_cluster_size,
+                    sentence_min_n=sentence_min_n,
+                    tiny_height_ratio=tiny_height_ratio,
+                    frac_width_ratio=frac_width_ratio,
+                    frac_height_ratio=frac_height_ratio,
+                    tall_height_ratio=tall_height_ratio,
+                )
                 cluster_scores.append(s)
                 cluster_strongs.append(strong)
                 cluster_signals.append(sigs)
@@ -316,6 +393,11 @@ def detect_inline_equations(text_regions, font_size,
 
                 score_delta = score - baseline
 
+                # Adaptive delta: stronger math signals need less separation
+                strong_delta = delta_threshold
+                if sigs.get("has_frac") or (sigs.get("tiny_count", 0) >= 1 and sigs.get("operatorish", 0) >= 1):
+                    strong_delta = max(3.5, delta_threshold - 1.5)
+
                 # Check if all blobs are body-height (pure text)
                 all_body = all(
                     font_size * 0.55 <= b["height"] <= font_size * 1.5
@@ -323,12 +405,18 @@ def detect_inline_equations(text_regions, font_size,
                 )
 
                 # Final gate — all conditions must pass
+                passes_score = (
+                    score >= score_threshold or
+                    (sigs.get("tiny_count", 0) >= 3 and sigs.get("v_spread", 0) > 0.9
+                     and (sigs.get("operatorish", 0) >= 1 or sigs.get("tall_count", 0) >= 1)
+                     and score_delta >= strong_delta + 1.5)
+                )
                 is_inline_eq = (
                     strong                          # unambiguous math feature
-                    and score >= score_threshold    # strong enough absolute score
-                    and score_delta >= delta_threshold  # anomalous vs line baseline
+                    and passes_score               # absolute score or tiny+spread override
+                    and score_delta >= strong_delta # anomalous vs line baseline
                     and not all_body               # at least one outlier blob
-                    and baseline < 1.5             # line mostly looks like text
+                    and baseline < baseline_max    # line mostly looks like text
                 )
 
                 if debug:
@@ -337,19 +425,22 @@ def detect_inline_equations(text_regions, font_size,
                     cy1 = min(b["y1"] for b in cluster)
                     cy2 = max(b["y2"] for b in cluster)
                     tag = "▶ EQ" if is_inline_eq else "   "
-                    print(
-                        f"  {tag} x=[{cx1:4d},{cx2:4d}] "
-                        f"n={sigs['n']:2d} "
-                        f"cv_h={sigs['cv_h']:.2f} "
-                        f"frac={sigs['has_frac']} "
-                        f"tall={sigs['tall_count']} "
-                        f"tiny={sigs['tiny_count']} "
-                        f"body={sigs['body_ratio']:.2f} "
-                        f"score={score:+.1f} "
-                        f"base={baseline:+.1f} "
-                        f"delta={score_delta:+.1f} "
-                        f"strong={strong}"
-                    )
+                    if "reason" in sigs:
+                        print(f"  {tag} x=[{cx1:4d},{cx2:4d}] rejected: {sigs['reason']}")
+                    else:
+                        print(
+                            f"  {tag} x=[{cx1:4d},{cx2:4d}] "
+                            f"n={sigs['n']:2d} "
+                            f"cv_h={sigs['cv_h']:.2f} "
+                            f"frac={sigs['has_frac']} "
+                            f"tall={sigs['tall_count']} "
+                            f"tiny={sigs['tiny_count']} "
+                            f"body={sigs['body_ratio']:.2f} "
+                            f"score={score:+.1f} "
+                            f"base={baseline:+.1f} "
+                            f"delta={score_delta:+.1f} "
+                            f"strong={strong}"
+                        )
 
                 if is_inline_eq:
                     cx1 = min(b["x1"] for b in cluster)

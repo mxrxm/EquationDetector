@@ -16,8 +16,8 @@ class EdgeDocumentTypeDetector(BaseDocumentTypeDetector):
     name = "edge"
 
     # Tuned thresholds
-    EDGE_DENSITY_DENSE  = 0.06   # fraction of sampled pixels that are edges
-    HORIZ_RATIO_DENSE   = 0.52   # fraction of edges that are horizontal
+    EDGE_DENSITY_DENSE  = 0.05   # fraction of sampled pixels that are edges
+    HORIZ_RATIO_DENSE   = 0.35   # fraction of edges that are horizontal
 
     # Sobel sampling step — every Nth pixel (4 = fast, 1 = precise)
     SAMPLE_STEP = 4
