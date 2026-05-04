@@ -29,64 +29,112 @@ from collections import deque
 # STAGE 3 — Connected Component Analysis (BFS, 8-connected)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def find_all_blobs(binary, min_blob_area=5, max_blob_area_ratio=0.05):
-    h, w         = len(binary), len(binary[0])
-    img_area     = h * w
-    max_box_area = img_area * max_blob_area_ratio
-    visited      = [[False] * w for _ in range(h)]
-    blobs        = []
+# def find_all_blobs(binary, min_blob_area=5, max_blob_area_ratio=0.05):
+#     h, w         = len(binary), len(binary[0])
+#     img_area     = h * w
+#     max_box_area = img_area * max_blob_area_ratio
+#     visited      = [[False] * w for _ in range(h)]
+#     blobs        = []
 
-    NEIGHBOURS = [(-1,-1),(-1,0),(-1,1),
-                  ( 0,-1),       ( 0,1),
-                  ( 1,-1),( 1,0),( 1,1)]
+#     NEIGHBOURS = [(-1,-1),(-1,0),(-1,1),
+#                   ( 0,-1),       ( 0,1),
+#                   ( 1,-1),( 1,0),( 1,1)]
+
+#     def bfs(start_r, start_c):
+#         queue = deque()
+#         queue.append((start_r, start_c))
+#         visited[start_r][start_c] = True
+#         area = 0
+#         y1 = y2 = start_r
+#         x1 = x2 = start_c
+#         while queue:
+#             r, c = queue.popleft()
+#             area += 1
+#             if r < y1: y1 = r
+#             if r > y2: y2 = r
+#             if c < x1: x1 = c
+#             if c > x2: x2 = c
+#             for dr, dc in NEIGHBOURS:
+#                 nr, nc = r + dr, c + dc
+#                 if (0 <= nr < h and 0 <= nc < w
+#                         and not visited[nr][nc]
+#                         and binary[nr][nc] == 1):
+#                     visited[nr][nc] = True
+#                     queue.append((nr, nc))
+#         return area, y1, y2, x1, x2
+
+#     for r in range(h):
+#         for c in range(w):
+#             if binary[r][c] == 1 and not visited[r][c]:
+#                 area, y1, y2, x1, x2 = bfs(r, c)
+#                 if area < min_blob_area:
+#                     continue
+#                 bh = y2 - y1 + 1
+#                 bw = x2 - x1 + 1
+#                 box_area = bh * bw
+#                 if box_area > max_box_area:
+#                     continue
+#                 blobs.append({
+#                     "x1":           x1,
+#                     "y1":           y1,
+#                     "x2":           x2,
+#                     "y2":           y2,
+#                     "height":       bh,
+#                     "width":        bw,
+#                     "area":         area,
+#                     "fill_ratio":   area / box_area if box_area > 0 else 0.0,
+#                     "aspect_ratio": bw / bh if bh > 0 else 0.0,
+#                     "center_r":     (y1 + y2) / 2.0,
+#                     "center_c":     (x1 + x2) / 2.0,
+#                 })
+#     return blobs
+def find_all_blobs(binary, min_blob_area=5):
+    h, w    = len(binary), len(binary[0])
+    visited = [[False] * w for _ in range(h)]
+    blobs   = []
 
     def bfs(start_r, start_c):
-        queue = deque()
-        queue.append((start_r, start_c))
+        queue   = [(start_r, start_c)]
         visited[start_r][start_c] = True
-        area = 0
-        y1 = y2 = start_r
-        x1 = x2 = start_c
+        pixels  = []
         while queue:
-            r, c = queue.popleft()
-            area += 1
-            if r < y1: y1 = r
-            if r > y2: y2 = r
-            if c < x1: x1 = c
-            if c > x2: x2 = c
-            for dr, dc in NEIGHBOURS:
-                nr, nc = r + dr, c + dc
-                if (0 <= nr < h and 0 <= nc < w
-                        and not visited[nr][nc]
-                        and binary[nr][nc] == 1):
-                    visited[nr][nc] = True
-                    queue.append((nr, nc))
-        return area, y1, y2, x1, x2
+            r, c = queue.pop(0)
+            pixels.append((r, c))
+            for dr in [-1, 0, 1]:
+                for dc in [-1, 0, 1]:
+                    if dr == 0 and dc == 0:
+                        continue
+                    nr, nc = r + dr, c + dc
+                    if (0 <= nr < h and 0 <= nc < w
+                            and not visited[nr][nc]
+                            and binary[nr][nc] == 1):
+                        visited[nr][nc] = True
+                        queue.append((nr, nc))
+        return pixels
 
     for r in range(h):
         for c in range(w):
             if binary[r][c] == 1 and not visited[r][c]:
-                area, y1, y2, x1, x2 = bfs(r, c)
-                if area < min_blob_area:
+                pixels = bfs(r, c)
+                if len(pixels) < min_blob_area:
                     continue
+                rows = [p[0] for p in pixels]
+                cols = [p[1] for p in pixels]
+                y1, y2 = min(rows), max(rows)
+                x1, x2 = min(cols), max(cols)
                 bh = y2 - y1 + 1
                 bw = x2 - x1 + 1
-                box_area = bh * bw
-                if box_area > max_box_area:
-                    continue
                 blobs.append({
-                    "x1":           x1,
-                    "y1":           y1,
-                    "x2":           x2,
-                    "y2":           y2,
+                    "x1": x1, "y1": y1, "x2": x2, "y2": y2,
                     "height":       bh,
                     "width":        bw,
-                    "area":         area,
-                    "fill_ratio":   area / box_area if box_area > 0 else 0.0,
-                    "aspect_ratio": bw / bh if bh > 0 else 0.0,
-                    "center_r":     (y1 + y2) / 2.0,
-                    "center_c":     (x1 + x2) / 2.0,
+                    "area":         len(pixels),
+                    "aspect_ratio": bw / bh if bh > 0 else 0,
+                    "center_r":     (y1 + y2) / 2,
+                    "center_c":     (x1 + x2) / 2,
                 })
+
+    print(f"  Total blobs found: {len(blobs)}")
     return blobs
 
 
@@ -94,83 +142,92 @@ def find_all_blobs(binary, min_blob_area=5, max_blob_area_ratio=0.05):
 # STAGE 4 — Font size estimation
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def estimate_font_size(blobs, right_margin_crop=0.85):
-    """
-    Estimate dominant body-text glyph height via area-weighted histogram.
+# def estimate_font_size(blobs, right_margin_crop=0.85):
+#     """
+#     Estimate dominant body-text glyph height via area-weighted histogram.
 
-    Filters applied before histogram:
-        aspect_ratio >= 0.4   — excludes tall-thin math symbols (integrals)
-        area         >= 20    — excludes micro noise fragments
-        fill_ratio   >= 0.25  — excludes hollow symbols (summation, brackets)
-                                [FIX v3: this was the main cause of font_size=12]
-    Sidebar blobs (x > 85% image width) cropped before filtering.
-    """
+#     Filters applied before histogram:
+#         aspect_ratio >= 0.4   — excludes tall-thin math symbols (integrals)
+#         area         >= 20    — excludes micro noise fragments
+#         fill_ratio   >= 0.25  — excludes hollow symbols (summation, brackets)
+#                                 [FIX v3: this was the main cause of font_size=12]
+#     Sidebar blobs (x > 85% image width) cropped before filtering.
+#     """
+#     if not blobs:
+#         return 20
+
+#     # Step 0: crop sidebar
+#     img_width = max(b["x2"] for b in blobs)
+#     x_limit   = img_width * right_margin_crop
+#     blobs     = [b for b in blobs if b["center_c"] <= x_limit]
+#     if not blobs:
+#         return 20
+
+#     # Step 1: filter
+#     MIN_HEIGHT = 4
+#     MIN_ASPECT = 0.4
+#     MIN_AREA   = 20
+#     MIN_FILL   = 0.25   # v3 fix — hollow symbols excluded
+
+#     candidates = [b for b in blobs
+#                   if b["height"]       >= MIN_HEIGHT
+#                   and b["aspect_ratio"] >= MIN_ASPECT
+#                   and b["area"]         >= MIN_AREA
+#                   and b["fill_ratio"]   >= MIN_FILL]
+
+#     # graceful fallbacks
+#     if not candidates:
+#         candidates = [b for b in blobs
+#                       if b["height"] >= MIN_HEIGHT
+#                       and b["aspect_ratio"] >= MIN_ASPECT
+#                       and b["area"] >= MIN_AREA]
+#     if not candidates:
+#         candidates = blobs
+
+#     # Step 2: area-weighted histogram
+#     hist = {}
+#     for b in candidates:
+#         h = b["height"]
+#         hist[h] = hist.get(h, 0) + b["area"]
+
+#     # Step 3: find all local peaks in the smoothed histogram
+#     # then return the HIGHEST-HEIGHT significant peak.
+#     #
+#     # Why: math-heavy documents produce a bimodal distribution —
+#     #   peak 1 at h~12  (inline equation symbols, subscripts)
+#     #   peak 2 at h~16  (body text glyphs)
+#     # The lower peak often has more total area in math articles.
+#     # Picking the global maximum gives h=12; we want h=16.
+#     # "Significant" = peak weight >= 30% of the strongest peak weight.
+#     # Taking the highest-h significant peak gives body-text height.
+#     peaks = []
+#     for h in sorted(hist.keys()):
+#         score = hist.get(h-1, 0) + hist.get(h, 0) + hist.get(h+1, 0)
+#         left  = hist.get(h-2, 0) + hist.get(h-1, 0)
+#         right = hist.get(h+1, 0) + hist.get(h+2, 0)
+#         if score > left and score > right:
+#             peaks.append((h, score))
+
+#     if not peaks:
+#         # degenerate: histogram has no local peak (flat or single bin)
+#         best_h = max(hist, key=lambda h: hist[h])
+#     else:
+#         max_weight = max(s for _, s in peaks)
+#         threshold  = max_weight * 0.30
+#         sig_peaks  = [h for h, s in peaks if s >= threshold]
+#         best_h     = max(sig_peaks)   # highest-h significant peak = body text
+
+#     # Step 4: sanity clamp
+#     return max(6, min(best_h, 120))
+def estimate_font_size(blobs):
     if not blobs:
         return 20
-
-    # Step 0: crop sidebar
-    img_width = max(b["x2"] for b in blobs)
-    x_limit   = img_width * right_margin_crop
-    blobs     = [b for b in blobs if b["center_c"] <= x_limit]
-    if not blobs:
-        return 20
-
-    # Step 1: filter
-    MIN_HEIGHT = 4
-    MIN_ASPECT = 0.4
-    MIN_AREA   = 20
-    MIN_FILL   = 0.25   # v3 fix — hollow symbols excluded
-
-    candidates = [b for b in blobs
-                  if b["height"]       >= MIN_HEIGHT
-                  and b["aspect_ratio"] >= MIN_ASPECT
-                  and b["area"]         >= MIN_AREA
-                  and b["fill_ratio"]   >= MIN_FILL]
-
-    # graceful fallbacks
-    if not candidates:
-        candidates = [b for b in blobs
-                      if b["height"] >= MIN_HEIGHT
-                      and b["aspect_ratio"] >= MIN_ASPECT
-                      and b["area"] >= MIN_AREA]
-    if not candidates:
-        candidates = blobs
-
-    # Step 2: area-weighted histogram
     hist = {}
-    for b in candidates:
-        h = b["height"]
-        hist[h] = hist.get(h, 0) + b["area"]
-
-    # Step 3: find all local peaks in the smoothed histogram
-    # then return the HIGHEST-HEIGHT significant peak.
-    #
-    # Why: math-heavy documents produce a bimodal distribution —
-    #   peak 1 at h~12  (inline equation symbols, subscripts)
-    #   peak 2 at h~16  (body text glyphs)
-    # The lower peak often has more total area in math articles.
-    # Picking the global maximum gives h=12; we want h=16.
-    # "Significant" = peak weight >= 30% of the strongest peak weight.
-    # Taking the highest-h significant peak gives body-text height.
-    peaks = []
-    for h in sorted(hist.keys()):
-        score = hist.get(h-1, 0) + hist.get(h, 0) + hist.get(h+1, 0)
-        left  = hist.get(h-2, 0) + hist.get(h-1, 0)
-        right = hist.get(h+1, 0) + hist.get(h+2, 0)
-        if score > left and score > right:
-            peaks.append((h, score))
-
-    if not peaks:
-        # degenerate: histogram has no local peak (flat or single bin)
-        best_h = max(hist, key=lambda h: hist[h])
-    else:
-        max_weight = max(s for _, s in peaks)
-        threshold  = max_weight * 0.30
-        sig_peaks  = [h for h, s in peaks if s >= threshold]
-        best_h     = max(sig_peaks)   # highest-h significant peak = body text
-
-    # Step 4: sanity clamp
-    return max(6, min(best_h, 120))
+    for b in blobs:
+        hist[b["height"]] = hist.get(b["height"], 0) + 1
+    font_size = max(hist, key=hist.get)
+    print(f"  Estimated font size: {font_size}px")
+    return font_size
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -375,127 +432,12 @@ def _split_region_by_y_gap(group_blobs, font_size, line_v_factor,
 # STAGE 5 — Group blobs into regions  (two-pass Union-Find)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def group_blobs_into_regions(blobs, font_size,
-                              h_gap_factor=2.3,
-                              line_v_factor=2.2,
-                              para_v_factor=None,
-                              min_blobs_per_region=2,
-                              max_region_aspect=25.0,
-                              max_region_height_factor=18.0,
-                              min_region_density=0.05):
-    """
-    Two-pass Union-Find region grouping.
-
-    Pass 1 — blob → line  (tight v_gap = font_size × line_v_factor)
-    Pass 2 — line → paragraph  (auto-calibrated v_gap, capped at 4× font_size)
-
-    Guards (in order):
-        1. height-split  — implausibly tall → _split_region_by_y_gap
-        2. density check — sparse accidental merge → discard
-        3. aspect-split  — implausibly wide → _split_region_by_x_gap
-        4. append
-    """
-    if not blobs:
-        return []
-
-    # Pass 1: blob → line
-    line_regions = _union_find_group(
-        blobs,
-        h_gap=font_size * h_gap_factor,
-        v_gap=font_size * line_v_factor,
-        min_members=1,
-    )
-    if not line_regions:
-        return []
-
-    # Auto-calibrate para gap with safety ceiling
-    if para_v_factor is None:
-        para_v_px = _estimate_para_gap_factor(line_regions, font_size)
-        para_v_px = min(para_v_px, font_size * 4.0)   # v3 fix
-    else:
-        para_v_px = font_size * para_v_factor
-
-    print(f"  [calibration] line_regions={len(line_regions)}, "
-          f"para_v_px={para_v_px:.1f}px "
-          f"(={para_v_px / font_size:.2f}× font_size)")
-
-    # Pass 2: line → paragraph (pseudo-blobs wrapping line regions)
-    pseudo_blobs = [{
-        "x1": lr["x1"], "y1": lr["y1"], "x2": lr["x2"], "y2": lr["y2"],
-        "height": lr["height"], "width": lr["width"],
-        "area": lr["density"] * lr["width"] * lr["height"],
-        "fill_ratio": lr["density"],
-        "aspect_ratio": lr["width"] / lr["height"] if lr["height"] > 0 else 1.0,
-        "center_r": (lr["y1"] + lr["y2"]) / 2.0,
-        "center_c": (lr["x1"] + lr["x2"]) / 2.0,
-        "_line_blobs": lr["blobs"],
-    } for lr in line_regions]
-
-    para_regions = _union_find_group(
-        pseudo_blobs,
-        h_gap=font_size * h_gap_factor,
-        v_gap=para_v_px,
-        min_members=1,
-    )
-
-    result = []
-    for pr in para_regions:
-        real_blobs = []
-        for pb in pr["blobs"]:
-            real_blobs.extend(pb["_line_blobs"])
-
-        if len(real_blobs) < min_blobs_per_region:
-            continue
-
-        rx1 = min(b["x1"] for b in real_blobs)
-        ry1 = min(b["y1"] for b in real_blobs)
-        rx2 = max(b["x2"] for b in real_blobs)
-        ry2 = max(b["y2"] for b in real_blobs)
-        rw  = rx2 - rx1 + 1
-        rh  = ry2 - ry1 + 1
-        box_area = rw * rh
-        ink_area = sum(b["area"] for b in real_blobs)
-        density  = ink_area / box_area if box_area > 0 else 0.0
-
-        # Guard 1: height-split
-        if rh > font_size * max_region_height_factor:
-            sub = _split_region_by_y_gap(
-                real_blobs, font_size, line_v_factor,
-                min_blobs_per_region=1,
-                min_region_density=min_region_density)
-            result.extend(sub)
-            continue
-
-        # Guard 2: density
-        n_lines       = max(1, rh / font_size)
-        density_floor = min_region_density / (n_lines ** 0.5)
-        if density < density_floor:
-            continue
-
-        # Guard 3: aspect-split
-        if (rw / rh if rh > 0 else 0) > max_region_aspect:
-            sub = _split_region_by_x_gap(
-                real_blobs, font_size, h_gap_factor,
-                min_blobs_per_region, min_region_density)
-            result.extend(sub)
-            continue
-
-        result.append({
-            "x1": rx1, "y1": ry1, "x2": rx2, "y2": ry2,
-            "width": rw, "height": rh,
-            "blobs": real_blobs, "blob_count": len(real_blobs),
-            "density": density,
-        })
-
-    return result
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PUBLIC ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def run_blob_analysis(binary, min_blob_area=5, max_blob_area_ratio=0.05,
-                      min_blobs_per_region=2):
+def run_blob_analysis(binary, min_blob_area=5):
     """
     Run the full blob analysis pipeline on a binarized image.
 
@@ -512,17 +454,7 @@ def run_blob_analysis(binary, min_blob_area=5, max_blob_area_ratio=0.05,
     dict:  blobs, font_size, regions
     """
     blobs     = find_all_blobs(binary,
-                               min_blob_area=min_blob_area,
-                               max_blob_area_ratio=max_blob_area_ratio)
+                               min_blob_area=min_blob_area)
     font_size = estimate_font_size(blobs)
-    regions   = group_blobs_into_regions(
-        blobs, font_size,
-        h_gap_factor             = 2.3,
-        line_v_factor            = 2.2,
-        para_v_factor            = None,
-        min_blobs_per_region     = min_blobs_per_region,
-        max_region_aspect        = 25.0,
-        max_region_height_factor = 18.0,
-        min_region_density       = 0.05,
-    )
-    return {"blobs": blobs, "font_size": font_size, "regions": regions}
+
+    return {"blobs": blobs, "font_size": font_size}

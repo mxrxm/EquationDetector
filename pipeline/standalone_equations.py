@@ -1,10 +1,9 @@
 import math
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
 
-from preprocessing import preprocess
-from blob_analysis import run_blob_analysis
 
+from pipeline.blob_analysis import run_blob_analysis
+import region_grouping
+import preprocessing
 
 
 
@@ -145,172 +144,174 @@ def detect_standalone_equations(regions, font_size, img_height,
     return results
 
 
-# ─────────────────────────────────────────
-# Public entry point
-# ─────────────────────────────────────────
+# # ─────────────────────────────────────────
+# # Public entry point
+# # ─────────────────────────────────────────
 
-def detect(image_path, debug=False):
-    """
-    Run the standalone-equation detector on a single image.
+# def detect(image_path, debug=False):
+#     """
+#     Run the standalone-equation detector on a single image.
 
-    Parameters
-    ----------
-    image_path : str   path to any PIL-readable image
-    debug      : bool  print per-region scoring details
+#     Parameters
+#     ----------
+#     image_path : str   path to any PIL-readable image
+#     debug      : bool  print per-region scoring details
 
-    Returns
-    -------
-    gray        : 2-D list of int (grayscale pixel values)
-    detections  : list of dicts {box:(x1,y1,x2,y2), confidence, class=0}
-    """
-    result    = preprocess(image_path)
-    gray      = result["gray"]
-    binary    = result["binary"]
-    width     = result["width"]
-    height    = result["height"]
+#     Returns
+#     -------
+#     gray        : 2-D list of int (grayscale pixel values)
+#     detections  : list of dicts {box:(x1,y1,x2,y2), confidence, class=0}
+#     """
+#     result    = preprocessing.preprocess(image_path)
+#     gray      = result["gray"]
+#     binary    = result["binary"]
+#     width     = result["width"]
+#     height    = result["height"]
 
-    blob_result = run_blob_analysis(binary)
-    blobs     = blob_result["blobs"]
-    font_size = blob_result["font_size"]
-    regions   = blob_result["regions"]
-    detections = detect_standalone_equations(
-        regions, font_size, height, top_margin=0.05, debug=debug
-    )
+#     blob_result = run_blob_analysis(binary)
+#     blobs     = blob_result["blobs"]
+#     font_size = blob_result["font_size"]
 
-    print(f"Standalone equations detected: {len(detections)}")
-    return gray, detections
+#     regions =region_grouping(blobs, font_size,
+#                               h_gap_factor=2.3, v_gap_factor=1.2)
+#     detections = detect_standalone_equations(
+#         regions, font_size, height, top_margin=0.05, debug=debug
+#     )
+
+#     print(f"Standalone equations detected: {len(detections)}")
+#     return gray, detections
 
 
-# ─────────────────────────────────────────
+# # ─────────────────────────────────────────
 # Optional: save annotated image
 # ─────────────────────────────────────────
 
-def save_result(gray, detections, out_path="standalone_detections.png"):
-    fig, ax = plt.subplots(figsize=(12, 16))
-    ax.imshow(gray, cmap="gray", vmin=0, vmax=255)
+# def save_result(gray, detections, out_path="standalone_detections.png"):
+#     fig, ax = plt.subplots(figsize=(12, 16))
+#     ax.imshow(gray, cmap="gray", vmin=0, vmax=255)
 
-    for det in detections:
-        x1, y1, x2, y2 = det["box"]
-        conf = det["confidence"]
-        rect = patches.Rectangle(
-            (x1, y1), x2 - x1, y2 - y1,
-            linewidth=2, edgecolor="red",
-            facecolor="red", alpha=0.15
-        )
-        ax.add_patch(rect)
-        ax.text(x1 + 2, y1 - 3, f"{conf:.2f}",
-                color="red", fontsize=7, fontweight="bold",
-                verticalalignment="bottom")
+#     for det in detections:
+#         x1, y1, x2, y2 = det["box"]
+#         conf = det["confidence"]
+#         rect = patches.Rectangle(
+#             (x1, y1), x2 - x1, y2 - y1,
+#             linewidth=2, edgecolor="red",
+#             facecolor="red", alpha=0.15
+#         )
+#         ax.add_patch(rect)
+#         ax.text(x1 + 2, y1 - 3, f"{conf:.2f}",
+#                 color="red", fontsize=7, fontweight="bold",
+#                 verticalalignment="bottom")
 
-    ax.set_title(f"Standalone equations detected: {len(detections)}", fontsize=12)
-    ax.axis("off")
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"Saved: {out_path}")
-
-
-# ─────────────────────────────────────────
-# Batch runner
-# ─────────────────────────────────────────
-
-import os
-import csv
-import glob
-
-def run_batch(input_dir, output_dir, pattern="*.png", debug=False):
-    """
-    Run standalone equation detection on all images in input_dir.
-
-    For each image it produces:
-      - an annotated PNG  → output_dir/<stem>_detections.png
-      - a per-image CSV   → output_dir/<stem>_detections.csv
-
-    After all images it writes a summary CSV → output_dir/summary.csv
-    with one row per image: filename, num_detections, avg_confidence.
-
-    Parameters
-    ----------
-    input_dir  : str   folder that contains the images
-    output_dir : str   folder where results are written (created if missing)
-    pattern    : str   glob pattern for image files (default "*.png")
-    debug      : bool  pass-through to detect()
-    """
-    os.makedirs(output_dir, exist_ok=True)
-
-    image_paths = sorted(glob.glob(os.path.join(input_dir, pattern)))
-    if not image_paths:
-        print(f"No images matched '{pattern}' in '{input_dir}'")
-        return
-
-    print(f"Found {len(image_paths)} image(s) — starting batch...\n")
-
-    summary_rows = []
-
-    for idx, img_path in enumerate(image_paths, 1):
-        stem = os.path.splitext(os.path.basename(img_path))[0]
-        print(f"[{idx}/{len(image_paths)}] {stem}")
-
-        try:
-            gray, detections = detect(img_path, debug=debug)
-        except Exception as e:
-            print(f"  ERROR: {e}\n")
-            summary_rows.append({
-                "filename":        os.path.basename(img_path),
-                "num_detections":  "ERROR",
-                "avg_confidence":  "ERROR",
-            })
-            continue
-
-        # Annotated image
-        out_img = os.path.join(output_dir, f"{stem}_detections.png")
-        save_result(gray, detections, out_path=out_img)
-
-        # Per-image CSV
-        out_csv = os.path.join(output_dir, f"{stem}_detections.csv")
-        with open(out_csv, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["x1", "y1", "x2", "y2", "confidence"])
-            for det in detections:
-                x1, y1, x2, y2 = det["box"]
-                writer.writerow([x1, y1, x2, y2, det["confidence"]])
-        print(f"  CSV saved: {out_csv}\n")
-
-        avg_conf = (
-            round(sum(d["confidence"] for d in detections) / len(detections), 3)
-            if detections else 0.0
-        )
-        summary_rows.append({
-            "filename":       os.path.basename(img_path),
-            "num_detections": len(detections),
-            "avg_confidence": avg_conf,
-        })
-
-    # Summary CSV
-    summary_path = os.path.join(output_dir, "summary.csv")
-    with open(summary_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["filename",
-                                                "num_detections",
-                                                "avg_confidence"])
-        writer.writeheader()
-        writer.writerows(summary_rows)
-
-    total_eq = sum(
-        r["num_detections"] for r in summary_rows
-        if isinstance(r["num_detections"], int)
-    )
-    print(f"Batch done — {len(image_paths)} images | "
-          f"{total_eq} total detections")
-    print(f"Summary saved: {summary_path}")
+#     ax.set_title(f"Standalone equations detected: {len(detections)}", fontsize=12)
+#     ax.axis("off")
+#     plt.tight_layout()
+#     plt.savefig(out_path, dpi=150, bbox_inches="tight")
+#     plt.close()
+#     print(f"Saved: {out_path}")
 
 
-# ─────────────────────────────────────────
-# MAIN
-# ─────────────────────────────────────────
+# # ─────────────────────────────────────────
+# # Batch runner
+# # ─────────────────────────────────────────
 
-if __name__ == "__main__":
-    INPUT_DIR  = "dataset/images"          # ← folder with your input images
-    OUTPUT_DIR = "results"         # ← folder for annotated PNGs + CSVs
-    PATTERN    = "*.jpeg"           # ← change to "*.jpg" or "*.png;*.jpg" etc.
+# import os
+# import csv
+# import glob
 
-    run_batch(INPUT_DIR, OUTPUT_DIR, pattern=PATTERN, debug=False)
+# def run_batch(input_dir, output_dir, pattern="*.png", debug=False):
+#     """
+#     Run standalone equation detection on all images in input_dir.
+
+#     For each image it produces:
+#       - an annotated PNG  → output_dir/<stem>_detections.png
+#       - a per-image CSV   → output_dir/<stem>_detections.csv
+
+#     After all images it writes a summary CSV → output_dir/summary.csv
+#     with one row per image: filename, num_detections, avg_confidence.
+
+#     Parameters
+#     ----------
+#     input_dir  : str   folder that contains the images
+#     output_dir : str   folder where results are written (created if missing)
+#     pattern    : str   glob pattern for image files (default "*.png")
+#     debug      : bool  pass-through to detect()
+#     """
+#     os.makedirs(output_dir, exist_ok=True)
+
+#     image_paths = sorted(glob.glob(os.path.join(input_dir, pattern)))
+#     if not image_paths:
+#         print(f"No images matched '{pattern}' in '{input_dir}'")
+#         return
+
+#     print(f"Found {len(image_paths)} image(s) — starting batch...\n")
+
+#     summary_rows = []
+
+#     for idx, img_path in enumerate(image_paths, 1):
+#         stem = os.path.splitext(os.path.basename(img_path))[0]
+#         print(f"[{idx}/{len(image_paths)}] {stem}")
+
+#         try:
+#             gray, detections = detect(img_path, debug=debug)
+#         except Exception as e:
+#             print(f"  ERROR: {e}\n")
+#             summary_rows.append({
+#                 "filename":        os.path.basename(img_path),
+#                 "num_detections":  "ERROR",
+#                 "avg_confidence":  "ERROR",
+#             })
+#             continue
+
+#         # Annotated image
+#         out_img = os.path.join(output_dir, f"{stem}_detections.png")
+#         save_result(gray, detections, out_path=out_img)
+
+#         # Per-image CSV
+#         out_csv = os.path.join(output_dir, f"{stem}_detections.csv")
+#         with open(out_csv, "w", newline="") as f:
+#             writer = csv.writer(f)
+#             writer.writerow(["x1", "y1", "x2", "y2", "confidence"])
+#             for det in detections:
+#                 x1, y1, x2, y2 = det["box"]
+#                 writer.writerow([x1, y1, x2, y2, det["confidence"]])
+#         print(f"  CSV saved: {out_csv}\n")
+
+#         avg_conf = (
+#             round(sum(d["confidence"] for d in detections) / len(detections), 3)
+#             if detections else 0.0
+#         )
+#         summary_rows.append({
+#             "filename":       os.path.basename(img_path),
+#             "num_detections": len(detections),
+#             "avg_confidence": avg_conf,
+#         })
+
+#     # Summary CSV
+#     summary_path = os.path.join(output_dir, "summary.csv")
+#     with open(summary_path, "w", newline="") as f:
+#         writer = csv.DictWriter(f, fieldnames=["filename",
+#                                                 "num_detections",
+#                                                 "avg_confidence"])
+#         writer.writeheader()
+#         writer.writerows(summary_rows)
+
+#     total_eq = sum(
+#         r["num_detections"] for r in summary_rows
+#         if isinstance(r["num_detections"], int)
+#     )
+#     print(f"Batch done — {len(image_paths)} images | "
+#           f"{total_eq} total detections")
+#     print(f"Summary saved: {summary_path}")
+
+
+# # ─────────────────────────────────────────
+# # MAIN
+# # ─────────────────────────────────────────
+
+# if __name__ == "__main__":
+#     INPUT_DIR  = "dataset/images"          # ← folder with your input images
+#     OUTPUT_DIR = "results"         # ← folder for annotated PNGs + CSVs
+#     PATTERN    = "*.jpeg"           # ← change to "*.jpg" or "*.png;*.jpg" etc.
+
+#     run_batch(INPUT_DIR, OUTPUT_DIR, pattern=PATTERN, debug=False)
