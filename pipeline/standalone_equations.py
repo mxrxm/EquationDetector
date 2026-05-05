@@ -12,6 +12,56 @@ import preprocessing
 # Returns list of dicts {box, confidence, class=0}
 # ─────────────────────────────────────────
 
+def _suppress_nested_boxes(detections, overlap_threshold=0.7):
+    """
+    Remove boxes that are substantially contained within another box.
+    For each pair, if the smaller box overlaps the larger by more than
+    overlap_threshold (measured as intersection/smaller_box_area), drop it.
+    """
+    if len(detections) <= 1:
+        return detections
+
+    # Sort by box area descending — process larger boxes first
+    def box_area(d):
+        x1, y1, x2, y2 = d["box"]
+        return (x2 - x1) * (y2 - y1)
+
+    sorted_dets = sorted(detections, key=box_area, reverse=True)
+    keep = [True] * len(sorted_dets)
+
+    for i in range(len(sorted_dets)):
+        if not keep[i]:
+            continue
+        ax1, ay1, ax2, ay2 = sorted_dets[i]["box"]
+        for j in range(i + 1, len(sorted_dets)):
+            if not keep[j]:
+                continue
+            bx1, by1, bx2, by2 = sorted_dets[j]["box"]
+
+            # Intersection
+            ix1 = max(ax1, bx1)
+            iy1 = max(ay1, by1)
+            ix2 = min(ax2, bx2)
+            iy2 = min(ay2, by2)
+
+            if ix2 <= ix1 or iy2 <= iy1:
+                continue  # no overlap
+
+            inter_area = (ix2 - ix1) * (iy2 - iy1)
+            b_area     = (bx2 - bx1) * (by2 - by1)
+
+            if b_area == 0:
+                continue
+
+            # If smaller box is mostly inside larger box → suppress smaller
+            if inter_area / b_area >= overlap_threshold:
+                keep[j] = False
+
+    return [d for d, k in zip(sorted_dets, keep) if k]
+
+
+
+
 def detect_standalone_equations(regions, font_size, img_height,
                                  top_margin=0.05, debug=False):
     """
@@ -57,20 +107,29 @@ def detect_standalone_equations(regions, font_size, img_height,
         var_ar   = sum((x - mean_ar) ** 2 for x in aspects) / len(aspects)
         cv_ar    = math.sqrt(var_ar) / mean_ar if mean_ar > 0 else 0
 
-        tall_blobs    = sum(1 for b in blobs if b["height"] > font_size * 1.8)
-        wide_blobs    = sum(1 for b in blobs if b["width"] > font_size * 4.0
-                            and b["height"] < font_size * 0.5)
-        outlier_ratio = (tall_blobs + wide_blobs) / len(blobs)
+        tall_blobs = sum(1 for b in blobs if b["height"] > font_size * 1.8)
+        wide_blobs = sum(1 for b in blobs if b["width"] > font_size * 4.0
+                         and b["height"] < font_size * 0.5)
 
-        height_ratio  = h / font_size
-        region_ar     = w / h if h > 0 else 0
+        # Fraction bars: wide AND very flat
+        frac_bars = sum(1 for b in blobs
+                        if b["width"] > font_size * 1.0
+                        and b["height"] <= max(2, font_size * 0.18))
 
-        centers      = [b["center_r"] for b in blobs]
-        center_span  = (max(centers) - min(centers)) / font_size
+        # Tall symbols: Σ, integral signs
+        tall_symbols   = sum(1 for b in blobs if b["height"] > font_size * 1.5)
+        tall_sym_ratio = tall_symbols / len(blobs)
+        outlier_ratio  = (tall_blobs + wide_blobs) / len(blobs)
 
-        body_like    = sum(1 for b in blobs
-                           if font_size * 0.6 <= b["height"] <= font_size * 1.4)
-        body_ratio   = body_like / len(blobs)
+        height_ratio = h / font_size
+        region_ar    = w / h if h > 0 else 0
+
+        centers     = [b["center_r"] for b in blobs]
+        center_span = (max(centers) - min(centers)) / font_size
+
+        body_like  = sum(1 for b in blobs
+                         if font_size * 0.6 <= b["height"] <= font_size * 1.4)
+        body_ratio = body_like / len(blobs)
 
         region_center = (y1 + y2) / 2
         band_half     = font_size * 0.35
@@ -78,8 +137,26 @@ def detect_standalone_equations(regions, font_size, img_height,
                             if abs(c - region_center) <= band_half)
         band_ratio    = band_like / len(blobs)
 
-        blob_area     = sum(b["area"] for b in blobs)
-        area_ratio    = blob_area / max(1, w * h)
+        blob_area  = sum(b["area"] for b in blobs)
+        area_ratio = blob_area / max(1, w * h)
+
+        # ── Edge-outlier detection (bullet / equation-number pattern) ───
+        # Fires when ALL outlier blobs are clustered on the left or right
+        # edge of a wide region — characteristic of a bullet point (left)
+        # or a parenthesised equation number like "(25.3)" (right).
+        outlier_blobs_list = [b for b in blobs
+                              if b["height"] > font_size * 1.8 or
+                              (b["width"] > font_size * 4.0
+                               and b["height"] < font_size * 0.5)]
+        edge_outlier_penalty = False
+        if outlier_blobs_list and len(blobs) > 10:
+            outlier_centers_c = [b["center_c"] for b in outlier_blobs_list]
+            left_edge         = x1 + w * 0.15
+            right_edge        = x1 + w * 0.85
+            edge_outliers     = sum(1 for c in outlier_centers_c
+                                    if c < left_edge or c > right_edge)
+            if edge_outliers == len(outlier_blobs_list) and region_ar > 8:
+                edge_outlier_penalty = True
 
         # ── Scoring ─────────────────────────────────────────────────────
         score = 0
@@ -94,6 +171,8 @@ def detect_standalone_equations(regions, font_size, img_height,
         if region_ar < 3.0:      score += 1
         if center_span > 1.2:    score += 1
         if body_ratio < 0.4:     score += 1
+        if frac_bars >= 1:       score += 3   # fraction bar — strong signal
+        if tall_sym_ratio > 0.04: score += 2  # Σ, ∫ present
 
         # Penalties
         if cv_h < 0.2 and height_ratio < 1.3:         score -= 3
@@ -102,37 +181,83 @@ def detect_standalone_equations(regions, font_size, img_height,
         if body_ratio > 0.7 and height_ratio < 1.6:   score -= 2
         if band_ratio > 0.7 and height_ratio < 1.6:   score -= 1
         if area_ratio > 0.35 and height_ratio > 2.5:  score -= 2
+        if edge_outlier_penalty:                       score -= 4
 
-        # Mixed-structure bonus
+        # Mixed-structure bonus (cv_h AND cv_ar both high, few body-height blobs)
         if cv_h > 0.7 and cv_ar > 0.6 and body_ratio < 0.4:
             score += 3
 
         # ── Hard guards → reject ────────────────────────────────────────
+        mean_h_ratio = mean_h / font_size if font_size > 0 else 1.0
+        # Heading guard: all blobs are tall (mean height >> font_size) but region
+        # is shallow and has few blobs — characteristic of a bold section heading
+        if (mean_h_ratio > 1.6 and height_ratio < 5.0
+                and len(blobs) < 40 and cv_h < 0.5):
+            score = -99
+        # Single wide text line
         if (region_ar > 6 and height_ratio < 1.5
                 and center_span < 0.9 and body_ratio > 0.6):
             score = -99
+        
+        # # Guard A: rotated text / watermark / sidebar — never taller than wide
+        # if region_ar < 1.0:
+        #     score = -99
+
+        # # Guard B: wide dense text block with many blobs — title, multi-line header
+        # if (region_ar > 10 and height_ratio < 10.0 and cv_h < 0.55
+        #         and len(blobs) > 60 and outlier_ratio < 0.35):
+        #     score = -99
+
+        # # Guard C: short uniform text phrase — author names, labels, short captions
+        # if (len(blobs) <= 30 and height_ratio < 3.0
+        #         and cv_h < 0.45 and outlier_ratio < 0.20
+        #         and band_ratio > 0.5):
+        #     score = -99
+
+
+        # Small uniform region — likely a short text phrase
         if (len(blobs) <= 12 and height_ratio < 1.7
-                and center_span < 1.0 and body_ratio > 0.5):
-            score = -99
-        if (region_ar > 8 and cv_h < 0.5 and cv_ar < 0.5 and band_ratio > 0.6):
-            score = -99
-        if (height_ratio > 3.0 and cv_h < 0.45 and cv_ar < 1.75
-                and outlier_ratio < 0.08 and body_ratio > 0.60):
+                and center_span < 1.0 and body_ratio > 0.5
+                and band_ratio > 0.5):
             score = -99
 
+        # Wide uniform band — justified text line
+        if (region_ar > 8 and cv_h < 0.5 and cv_ar < 0.5 and band_ratio > 0.6):
+            score = -99
+
+        # Multi-line block with low height variance — paragraph text
+        if (height_ratio > 4.0 and cv_h < 0.55
+                and outlier_ratio < 0.15 and body_ratio > 0.45):
+            score = -99
+
+        # Tall paragraph block — even if cv_h is slightly higher,
+        # real equations rarely fill this many lines with body-height glyphs
+        if (height_ratio > 6.0 and cv_h < 0.55
+                and outlier_ratio < 0.12 and body_ratio > 0.50):
+            score = -99
+
+        # Very wide flat region (title lines, long text lines) —
+        # height_ratio < 4.0 covers titles that span 3-4 line heights
+        if (region_ar > 15 and height_ratio < 4.0 and cv_h < 0.55):
+            score = -99
+        # When font_size is very small, outlier and height thresholds are unreliable.
+        # Require stronger evidence: higher cv_h and real structural signals.
+        if font_size <= 12:
+            if cv_h < 0.65 and frac_bars == 0 and tall_sym_ratio < 0.05:
+                score = -99
         if debug:
             print(f"  ({x1},{y1})-({x2},{y2}) blobs={len(blobs):3d} "
                   f"cv_h={cv_h:.2f} outliers={outlier_ratio:.2f} "
                   f"h_ratio={height_ratio:.1f} ar={region_ar:.1f} "
-                  f"score={score:+d} → {'EQ' if score >= 3 else 'TEXT'}")
+                  f"score={score:+d} → {'EQ' if score >= 5 else 'TEXT'}")
 
-        if score < 3:
+        if score < 5:
             continue
 
         confidence = min(1.0, max(0.0, score / MAX_SCORE))
 
-        # Low-confidence detections are likely text misclassified
-        if confidence <= 0.3:
+        # Low-confidence detections are likely misclassified text
+        if confidence <= 0.35:
             continue
 
         results.append({
@@ -140,178 +265,5 @@ def detect_standalone_equations(regions, font_size, img_height,
             "confidence": round(confidence, 3),
             "class":      0,
         })
-
-    return results
-
-
-# # ─────────────────────────────────────────
-# # Public entry point
-# # ─────────────────────────────────────────
-
-# def detect(image_path, debug=False):
-#     """
-#     Run the standalone-equation detector on a single image.
-
-#     Parameters
-#     ----------
-#     image_path : str   path to any PIL-readable image
-#     debug      : bool  print per-region scoring details
-
-#     Returns
-#     -------
-#     gray        : 2-D list of int (grayscale pixel values)
-#     detections  : list of dicts {box:(x1,y1,x2,y2), confidence, class=0}
-#     """
-#     result    = preprocessing.preprocess(image_path)
-#     gray      = result["gray"]
-#     binary    = result["binary"]
-#     width     = result["width"]
-#     height    = result["height"]
-
-#     blob_result = run_blob_analysis(binary)
-#     blobs     = blob_result["blobs"]
-#     font_size = blob_result["font_size"]
-
-#     regions =region_grouping(blobs, font_size,
-#                               h_gap_factor=2.3, v_gap_factor=1.2)
-#     detections = detect_standalone_equations(
-#         regions, font_size, height, top_margin=0.05, debug=debug
-#     )
-
-#     print(f"Standalone equations detected: {len(detections)}")
-#     return gray, detections
-
-
-# # ─────────────────────────────────────────
-# Optional: save annotated image
-# ─────────────────────────────────────────
-
-# def save_result(gray, detections, out_path="standalone_detections.png"):
-#     fig, ax = plt.subplots(figsize=(12, 16))
-#     ax.imshow(gray, cmap="gray", vmin=0, vmax=255)
-
-#     for det in detections:
-#         x1, y1, x2, y2 = det["box"]
-#         conf = det["confidence"]
-#         rect = patches.Rectangle(
-#             (x1, y1), x2 - x1, y2 - y1,
-#             linewidth=2, edgecolor="red",
-#             facecolor="red", alpha=0.15
-#         )
-#         ax.add_patch(rect)
-#         ax.text(x1 + 2, y1 - 3, f"{conf:.2f}",
-#                 color="red", fontsize=7, fontweight="bold",
-#                 verticalalignment="bottom")
-
-#     ax.set_title(f"Standalone equations detected: {len(detections)}", fontsize=12)
-#     ax.axis("off")
-#     plt.tight_layout()
-#     plt.savefig(out_path, dpi=150, bbox_inches="tight")
-#     plt.close()
-#     print(f"Saved: {out_path}")
-
-
-# # ─────────────────────────────────────────
-# # Batch runner
-# # ─────────────────────────────────────────
-
-# import os
-# import csv
-# import glob
-
-# def run_batch(input_dir, output_dir, pattern="*.png", debug=False):
-#     """
-#     Run standalone equation detection on all images in input_dir.
-
-#     For each image it produces:
-#       - an annotated PNG  → output_dir/<stem>_detections.png
-#       - a per-image CSV   → output_dir/<stem>_detections.csv
-
-#     After all images it writes a summary CSV → output_dir/summary.csv
-#     with one row per image: filename, num_detections, avg_confidence.
-
-#     Parameters
-#     ----------
-#     input_dir  : str   folder that contains the images
-#     output_dir : str   folder where results are written (created if missing)
-#     pattern    : str   glob pattern for image files (default "*.png")
-#     debug      : bool  pass-through to detect()
-#     """
-#     os.makedirs(output_dir, exist_ok=True)
-
-#     image_paths = sorted(glob.glob(os.path.join(input_dir, pattern)))
-#     if not image_paths:
-#         print(f"No images matched '{pattern}' in '{input_dir}'")
-#         return
-
-#     print(f"Found {len(image_paths)} image(s) — starting batch...\n")
-
-#     summary_rows = []
-
-#     for idx, img_path in enumerate(image_paths, 1):
-#         stem = os.path.splitext(os.path.basename(img_path))[0]
-#         print(f"[{idx}/{len(image_paths)}] {stem}")
-
-#         try:
-#             gray, detections = detect(img_path, debug=debug)
-#         except Exception as e:
-#             print(f"  ERROR: {e}\n")
-#             summary_rows.append({
-#                 "filename":        os.path.basename(img_path),
-#                 "num_detections":  "ERROR",
-#                 "avg_confidence":  "ERROR",
-#             })
-#             continue
-
-#         # Annotated image
-#         out_img = os.path.join(output_dir, f"{stem}_detections.png")
-#         save_result(gray, detections, out_path=out_img)
-
-#         # Per-image CSV
-#         out_csv = os.path.join(output_dir, f"{stem}_detections.csv")
-#         with open(out_csv, "w", newline="") as f:
-#             writer = csv.writer(f)
-#             writer.writerow(["x1", "y1", "x2", "y2", "confidence"])
-#             for det in detections:
-#                 x1, y1, x2, y2 = det["box"]
-#                 writer.writerow([x1, y1, x2, y2, det["confidence"]])
-#         print(f"  CSV saved: {out_csv}\n")
-
-#         avg_conf = (
-#             round(sum(d["confidence"] for d in detections) / len(detections), 3)
-#             if detections else 0.0
-#         )
-#         summary_rows.append({
-#             "filename":       os.path.basename(img_path),
-#             "num_detections": len(detections),
-#             "avg_confidence": avg_conf,
-#         })
-
-#     # Summary CSV
-#     summary_path = os.path.join(output_dir, "summary.csv")
-#     with open(summary_path, "w", newline="") as f:
-#         writer = csv.DictWriter(f, fieldnames=["filename",
-#                                                 "num_detections",
-#                                                 "avg_confidence"])
-#         writer.writeheader()
-#         writer.writerows(summary_rows)
-
-#     total_eq = sum(
-#         r["num_detections"] for r in summary_rows
-#         if isinstance(r["num_detections"], int)
-#     )
-#     print(f"Batch done — {len(image_paths)} images | "
-#           f"{total_eq} total detections")
-#     print(f"Summary saved: {summary_path}")
-
-
-# # ─────────────────────────────────────────
-# # MAIN
-# # ─────────────────────────────────────────
-
-# if __name__ == "__main__":
-#     INPUT_DIR  = "dataset/images"          # ← folder with your input images
-#     OUTPUT_DIR = "results"         # ← folder for annotated PNGs + CSVs
-#     PATTERN    = "*.jpeg"           # ← change to "*.jpg" or "*.png;*.jpg" etc.
-
-#     run_batch(INPUT_DIR, OUTPUT_DIR, pattern=PATTERN, debug=False)
+    results = _suppress_nested_boxes(results, overlap_threshold=0.7)
+    return results  

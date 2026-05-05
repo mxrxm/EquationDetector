@@ -133,8 +133,10 @@ def run_cca_pipeline(image_path,
 
     # ── Pass 1 — Standalone equations ─────────────────────────────────────────
     print("[4/5] Pass 1 — standalone equation classification...")
-    regions =group_blobs_into_regions(blobs, font_size,
-                              h_gap_factor=2.3, v_gap_factor=1.2)
+    regions =group_blobs_into_regions(blobs, font_size
+                                        ,h_gap_factor=2.0,
+                                        line_v_factor=0.6,   
+                                        para_v_factor=None)
 
     eq_results_p1 = detect_standalone_equations(
         regions, font_size, height,
