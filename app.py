@@ -487,7 +487,7 @@ with tab1:
 # ── Tab 2: Equation Crops ─────────────────────────────────────────────────────
 with tab2:
     try:
-        from pipeline.crop_equations import crop_standalone
+        from output.crop_equations import crop_standalone
         _crop_ok = True
     except ImportError:
         _crop_ok = False

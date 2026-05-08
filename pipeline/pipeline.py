@@ -34,7 +34,7 @@ for _p in (_HERE, _ROOT):
 from .blob_detector import BlobDocumentTypeDetector
 from .frame_line_detector import filter_line_blobs
 from .region_grouping import group_blobs_into_regions
-from .preprocessing import preprocess
+from .preprocessing import _dilate, _erode, preprocess
 from .blob_analysis import run_blob_analysis
 from .standalone_equations import detect_standalone_equations
 
@@ -104,6 +104,8 @@ def run_cca_pipeline(image_path,
     filter_res = filter_line_blobs(blobs, width, height, font_size)
     blobs      = filter_res["clean_blobs"]
     print(f"      blobs rejected={len(filter_res['rejected_blobs'])}")
+    
+
 
     # ── Stage 4 — Region grouping + standalone equation detection ─────────────
     print("[4/4] Standalone equation classification...")
