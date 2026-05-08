@@ -610,7 +610,7 @@ if st.session_state.get("_cache_key") != _cache_key:
             gray, binary, blobs, font_size, text_boxes, eq_results = \
                 run_cca_pipeline(
                     tmp_path,
-                    detector_mode=detector_mode,
+                    # detector_mode=detector_mode,
                     inline_score_threshold=inline_score_threshold,
                     inline_delta_threshold=inline_delta_threshold,
                     inline_gap_factor=inline_gap_factor,
