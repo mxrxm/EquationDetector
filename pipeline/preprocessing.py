@@ -1,696 +1,385 @@
-# # """
-# # preprocessing.py
-# # ================
-# # Stage 1 & 2 of the Equation Detector Pipeline.
 
-# # Pure Python implementation — Pillow used ONLY for image I/O.
-# # No NumPy, no OpenCV, no SciPy.
+# """
+# preprocessing.py  [merged]
+# ================
+# Stages 1 & 2 of the Equation Detector Pipeline.
+
+# Pure Python — Pillow used ONLY for image I/O.
+
+# Merge notes
+# -----------
+# • API:            new flags-based API kept: gaussian_noise / negative_noise / unconnected
+# • Binarization:   upgraded to ADAPTIVE TILED OTSU from original v1 (better than global
+#                   Otsu for documents with uneven lighting or mixed dark/light regions).
+#                   Global Otsu (otsu_binarize) also exported for callers that need it.
+# • Blur:           applied only when gaussian_noise=True (new behaviour).
+# • Morph ops:      both opening (negative_noise) AND closing (unconnected) available.
+# • Returns:        global_threshold + was_stretched (new fields kept).
+# """
 
-# # Pipeline
-# # --------
-# #     1. Mode normalisation     — RGBA / P / L / 1  →  RGB
-# #     2. Max-dim resize         — clamp large images to prevent OOM
-# #     3. Grayscale conversion   — weighted luminance  (BT.601)
-# #     4. Contrast normalisation — histogram stretch   (auto, only if needed)
-# #     5. Deskew                 — projection-profile rotation (auto, only if needed)
-# #     6. Gaussian blur          — separable 1-D passes (radius auto or caller-set)
-# #     7. Adaptive tiled Otsu    — per-tile threshold + bilinear interpolation
-# #     8. Morphological opening  — erosion → dilation  (speckle removal)
-
-# # Public API
-# # ----------
-# #     result = preprocess(path, max_dim=2000, tile_size=128, blur_radius=None)
-
-# #     result["gray"]             — 2-D list[list[int]]   pixel values 0-255
-# #     result["binary"]           — 2-D list[list[int]]   0 = background, 1 = text
-# #     result["width"]            — int
-# #     result["height"]           — int
-# #     result["global_threshold"] — int    global Otsu value (0-255)
-# #     result["tile_thresholds"]  — 2-D list[list[int]]   per-tile Otsu values
-# #     result["skew_angle"]       — float  degrees applied  (0.0 if none)
-# #     result["was_stretched"]    — bool   True if contrast stretch was applied
-# # """
-
-# # import math
-# # from PIL import Image
-
-
-# # # ═══════════════════════════════════════════════════════════════════════════════
-# # # STEP 1 — Mode normalisation + loading
-# # # ═══════════════════════════════════════════════════════════════════════════════
-
-# # def _load_normalised(path):
-# #     """
-# #     Open any PIL-readable image, flatten transparency if present,
-# #     and return a plain RGB PIL Image.
-# #     """
-# #     img  = Image.open(path)
-# #     mode = img.mode
-
-# #     if mode in ("RGBA", "LA"):
-# #         # paste onto white background to flatten alpha
-# #         bg = Image.new("RGB", img.size, (255, 255, 255))
-# #         if mode == "RGBA":
-# #             bg.paste(img, mask=img.split()[3])
-# #         else:
-# #             bg.paste(img.convert("RGB"))
-# #         img = bg
-
-# #     elif mode == "P":
-# #         # palette → may have transparency info
-# #         img = img.convert("RGBA").convert("RGB") \
-# #             if "transparency" in img.info else img.convert("RGB")
-
-# #     elif mode == "1":
-# #         img = img.convert("L").convert("RGB")
-
-# #     elif mode == "L":
-# #         img = img.convert("RGB")
-
-# #     elif mode == "RGB":
-# #         pass
-
-# #     else:
-# #         img = img.convert("RGB")         # safe fallback
-
-# #     return img
-
-
-# # # ═══════════════════════════════════════════════════════════════════════════════
-# # # STEP 2 — Max-dim resize
-# # # ═══════════════════════════════════════════════════════════════════════════════
-
-# # def _resize_if_needed(img, max_dim):
-# #     """
-# #     Downscale img so its larger dimension does not exceed max_dim.
-# #     Returns (img, scale_factor).  scale_factor == 1.0 means no change.
-# #     """
-# #     if max_dim is None:
-# #         return img, 1.0
-
-# #     w, h = img.size
-# #     if max(w, h) <= max_dim:
-# #         return img, 1.0
-
-# #     scale = max_dim / max(w, h)
-# #     new_w = max(1, int(w * scale))
-# #     new_h = max(1, int(h * scale))
-# #     return img.resize((new_w, new_h), Image.LANCZOS), scale
-
-
-# # # ═══════════════════════════════════════════════════════════════════════════════
-# # # STEP 3 — Grayscale conversion
-# # # ═══════════════════════════════════════════════════════════════════════════════
-
-# # def _to_grayscale(img):
-# #     """
-# #     Convert an RGB PIL Image to a 2-D list[list[int]] (0-255)
-# #     using the BT.601 luminance formula:  Y = 0.299R + 0.587G + 0.114B
-# #     """
-# #     w, h   = img.size
-# #     pixels = list(img.getdata())
-# #     gray   = []
-# #     for r in range(h):
-# #         row = []
-# #         for c in range(w):
-# #             R, G, B  = pixels[r * w + c]
-# #             gray_val = int(0.299 * R + 0.587 * G + 0.114 * B)
-# #             row.append(gray_val)
-# #         gray.append(row)
-# #     return gray
-
-
-# # # ═══════════════════════════════════════════════════════════════════════════════
-# # # STEP 4 — Contrast normalisation  (histogram stretch)
-# # # ═══════════════════════════════════════════════════════════════════════════════
-
-# # def _needs_stretch(gray, low_contrast_threshold=80):
-# #     """
-# #     Return True if the dynamic range of the image is below
-# #     low_contrast_threshold  (faded scan / washed-out photo).
-# #     Uses the 2nd and 98th percentile to ignore extreme outliers.
-# #     """
-# #     h, w   = len(gray), len(gray[0])
-# #     flat   = sorted(gray[r][c] for r in range(h) for c in range(w))
-# #     n      = len(flat)
-# #     p2     = flat[int(0.02 * n)]
-# #     p98    = flat[int(0.98 * n)]
-# #     return (p98 - p2) < low_contrast_threshold
-
-
-# # def _stretch_contrast(gray):
-# #     """
-# #     Linear histogram stretch: map [p2, p98] → [0, 255].
-# #     Pixels outside that range are clamped.
-# #     Returns a new 2-D list[list[int]].
-# #     """
-# #     h, w = len(gray), len(gray[0])
-# #     flat = sorted(gray[r][c] for r in range(h) for c in range(w))
-# #     n    = len(flat)
-# #     lo   = flat[int(0.02 * n)]
-# #     hi   = flat[int(0.98 * n)]
-
-# #     if hi == lo:            # degenerate image (solid colour)
-# #         return [row[:] for row in gray]
-
-# #     scale  = 255.0 / (hi - lo)
-# #     result = []
-# #     for r in range(h):
-# #         row = []
-# #         for c in range(w):
-# #             v = int((gray[r][c] - lo) * scale)
-# #             row.append(max(0, min(255, v)))
-# #         result.append(row)
-# #     return result
-
-
-# # # # ═══════════════════════════════════════════════════════════════════════════════
-# # # # STEP 5 — Deskew  (projection-profile method)
-# # # # ═══════════════════════════════════════════════════════════════════════════════
-
-# # # def _quick_binarize(gray):
-# # #     """
-# # #     Fast single-pass global Otsu binarize — used only internally for deskew.
-# # #     Returns a flat list of 0/1 values (row-major).
-# # #     """
-# # #     h, w      = len(gray), len(gray[0])
-# # #     flat      = [gray[r][c] for r in range(h) for c in range(w)]
-# # #     histogram = [0] * 256
-# # #     for v in flat:
-# # #         histogram[v] += 1
-# # #     total     = h * w
-# # #     best_t    = 128
-# # #     best_var  = -1.0
-# # #     weight_bg = 0
-# # #     sum_bg    = 0
-# # #     total_sum = sum(i * histogram[i] for i in range(256))
-# # #     for t in range(256):
-# # #         weight_bg += histogram[t]
-# # #         if weight_bg == 0:
-# # #             continue
-# # #         weight_fg = total - weight_bg
-# # #         if weight_fg == 0:
-# # #             break
-# # #         sum_bg   += t * histogram[t]
-# # #         mean_bg   = sum_bg / weight_bg
-# # #         mean_fg   = (total_sum - sum_bg) / weight_fg
-# # #         var       = weight_bg * weight_fg * (mean_bg - mean_fg) ** 2
-# # #         if var > best_var:
-# # #             best_var = var
-# # #             best_t   = t
-# # #     return [1 if flat[i] < best_t else 0 for i in range(total)], best_t
-
-
-# # # def _horizontal_projection(binary_flat, width, height, angle_deg):
-# # #     """
-# # #     Rotate binary_flat by angle_deg (small angle approximation via shear),
-# # #     then compute the horizontal projection profile variance.
-# # #     Higher variance → text lines are more horizontal → better alignment.
-# # #     """
-# # #     rad   = math.radians(angle_deg)
-# # #     tan_a = math.tan(rad)
-# # #     rows  = [0] * height
-
-# # #     for r in range(height):
-# # #         for c in range(width):
-# # #             # shear: shift column by tan(angle) * row
-# # #             nc = c + int(r * tan_a)
-# # #             if 0 <= nc < width:
-# # #                 rows[r] += binary_flat[r * width + nc]
-
-# # #     mean = sum(rows) / height
-# # #     var  = sum((x - mean) ** 2 for x in rows) / height
-# # #     return var
-
-
-# # # def _detect_skew(gray, angle_range=5, angle_step=0.5, min_angle=1.0):
-# # #     """
-# # #     Search angles in [-angle_range, +angle_range] step angle_step degrees.
-# # #     Return the angle with the highest horizontal projection variance.
-# # #     Returns 0.0 if the best angle is within min_angle of 0 (no correction needed).
-# # #     """
-# # #     h, w          = len(gray), len(gray[0])
-# # #     binary_flat, _ = _quick_binarize(gray)
-
-# # #     best_angle = 0.0
-# # #     best_var   = -1.0
-
-# # #     angle = -angle_range
-# # #     while angle <= angle_range:
-# # #         var = _horizontal_projection(binary_flat, w, h, angle)
-# # #         if var > best_var:
-# # #             best_var   = var
-# # #             best_angle = angle
-# # #         angle = round(angle + angle_step, 6)
-
-# # #     if abs(best_angle) < min_angle:
-# # #         return 0.0
-# # #     return best_angle
-
-
-# # # def _rotate_gray(gray, angle_deg):
-# # #     """
-# # #     Rotate the grayscale 2-D list by angle_deg using bilinear interpolation.
-# # #     Background fill is 255 (white).
-# # #     Returns a new 2-D list of the same dimensions.
-# # #     """
-# # #     if angle_deg == 0.0:
-# # #         return gray
-
-# # #     h, w  = len(gray), len(gray[0])
-# # #     rad   = math.radians(-angle_deg)   # negative → correct direction
-# # #     cos_a = math.cos(rad)
-# # #     sin_a = math.sin(rad)
-# # #     cx    = w / 2.0
-# # #     cy    = h / 2.0
-
-# # #     result = []
-# # #     for r in range(h):
-# # #         row = []
-# # #         for c in range(w):
-# # #             # map destination pixel back to source
-# # #             dx  = c - cx
-# # #             dy  = r - cy
-# # #             src_c = cos_a * dx - sin_a * dy + cx
-# # #             src_r = sin_a * dx + cos_a * dy + cy
-
-# # #             # bilinear interpolation
-# # #             r0, c0 = int(math.floor(src_r)), int(math.floor(src_c))
-# # #             r1, c1 = r0 + 1, c0 + 1
-# # #             dr, dc  = src_r - r0, src_c - c0
-
-# # #             def safe(rr, cc):
-# # #                 if 0 <= rr < h and 0 <= cc < w:
-# # #                     return gray[rr][cc]
-# # #                 return 255   # white background
-
-# # #             val = (safe(r0, c0) * (1 - dr) * (1 - dc) +
-# # #                    safe(r0, c1) * (1 - dr) *      dc  +
-# # #                    safe(r1, c0) *      dr  * (1 - dc) +
-# # #                    safe(r1, c1) *      dr  *      dc)
-# # #             row.append(int(round(val)))
-# # #         result.append(row)
-# # #     return result
-
-
-# # # ═══════════════════════════════════════════════════════════════════════════════
-# # # STEP 6 — Gaussian blur  (separable 1-D passes)
-# # # ═══════════════════════════════════════════════════════════════════════════════
-
-# # def _gaussian_kernel_1d(radius):
-# #     """
-# #     Build a normalised 1-D Gaussian kernel of half-width radius.
-# #     sigma = radius / 2  (standard rule of thumb).
-# #     """
-# #     if radius == 0:
-# #         return [1.0]
-# #     sigma  = max(radius / 2.0, 0.5)
-# #     size   = 2 * radius + 1
-# #     kernel = [math.exp(-((i - radius) ** 2) / (2 * sigma ** 2))
-# #               for i in range(size)]
-# #     total  = sum(kernel)
-# #     return [k / total for k in kernel]
-
-
-# # def _convolve_horizontal(image, kernel):
-# #     h, w   = len(image), len(image[0])
-# #     radius = len(kernel) // 2
-# #     out    = []
-# #     for r in range(h):
-# #         row = []
-# #         for c in range(w):
-# #             acc = 0.0
-# #             for ki, kv in enumerate(kernel):
-# #                 cc  = min(max(c + ki - radius, 0), w - 1)
-# #                 acc += image[r][cc] * kv
-# #             row.append(acc)
-# #         out.append(row)
-# #     return out
-
-
-# # def _convolve_vertical(image, kernel):
-# #     h, w   = len(image), len(image[0])
-# #     radius = len(kernel) // 2
-# #     out    = [[0.0] * w for _ in range(h)]
-# #     for r in range(h):
-# #         for c in range(w):
-# #             acc = 0.0
-# #             for ki, kv in enumerate(kernel):
-# #                 rr  = min(max(r + ki - radius, 0), h - 1)
-# #                 acc += image[rr][c] * kv
-# #             out[r][c] = acc
-# #     return out
-
-
-# # def _gaussian_blur(gray, radius):
-# #     """Full separable Gaussian blur. Returns 2-D list[list[int]]."""
-# #     if radius == 0:
-# #         return gray
-# #     kernel  = _gaussian_kernel_1d(radius)
-# #     tmp     = _convolve_horizontal(gray, kernel)
-# #     blurred = _convolve_vertical(tmp, kernel)
-# #     h, w    = len(blurred), len(blurred[0])
-# #     return [[int(round(blurred[r][c])) for c in range(w)] for r in range(h)]
-
-
-# # # ═══════════════════════════════════════════════════════════════════════════════
-# # # STEP 7 — Adaptive tiled Otsu binarization
-# # # ═══════════════════════════════════════════════════════════════════════════════
-
-# # def _otsu_on_patch(flat_pixels):
-# #     """
-# #     Compute Otsu threshold on a flat list of ints (0-255).
-# #     Returns threshold t:  pixels < t  →  foreground (ink).
-# #     """
-# #     total = len(flat_pixels)
-# #     if total == 0:
-# #         return 128
-
-# #     histogram = [0] * 256
-# #     for v in flat_pixels:
-# #         histogram[v] += 1
-
-# #     best_t    = 128
-# #     best_var  = -1.0
-# #     weight_bg = 0
-# #     sum_bg    = 0
-# #     total_sum = sum(i * histogram[i] for i in range(256))
-
-# #     for t in range(256):
-# #         weight_bg += histogram[t]
-# #         if weight_bg == 0:
-# #             continue
-# #         weight_fg = total - weight_bg
-# #         if weight_fg == 0:
-# #             break
-# #         sum_bg   += t * histogram[t]
-# #         mean_bg   = sum_bg / weight_bg
-# #         mean_fg   = (total_sum - sum_bg) / weight_fg
-# #         var       = weight_bg * weight_fg * (mean_bg - mean_fg) ** 2
-# #         if var > best_var:
-# #             best_var = var
-# #             best_t   = t
-
-# #     return best_t
-
-
-# # def _compute_tile_thresholds(gray, tile_size):
-# #     """
-# #     Divide the image into tiles of tile_size × tile_size.
-# #     Return a 2-D list tile_thresh[tr][tc] of Otsu values.
-# #     """
-# #     h, w   = len(gray), len(gray[0])
-# #     n_rows = max(1, (h + tile_size - 1) // tile_size)
-# #     n_cols = max(1, (w + tile_size - 1) // tile_size)
-
-# #     tile_thresh = []
-# #     for tr in range(n_rows):
-# #         row_t = []
-# #         r0 = tr * tile_size
-# #         r1 = min(r0 + tile_size, h)
-# #         for tc in range(n_cols):
-# #             c0    = tc * tile_size
-# #             c1    = min(c0 + tile_size, w)
-# #             patch = [gray[r][c] for r in range(r0, r1) for c in range(c0, c1)]
-# #             row_t.append(_otsu_on_patch(patch))
-# #         tile_thresh.append(row_t)
-
-# #     return tile_thresh
-
-
-# # def _bilinear_interpolate_thresholds(tile_thresh, width, height, tile_size):
-# #     """
-# #     Bilinear-interpolate the coarse tile_thresh grid back to full resolution.
-# #     Returns a 2-D list thresh_map[r][c] (float).
-# #     """
-# #     n_rows = len(tile_thresh)
-# #     n_cols = len(tile_thresh[0])
-
-# #     thresh_map = []
-# #     for r in range(height):
-# #         row = []
-# #         # tile-space fractional position of pixel centre
-# #         tf = (r + 0.5) / tile_size - 0.5
-# #         tr0 = max(0, min(n_rows - 2, int(math.floor(tf))))
-# #         tr1 = tr0 + 1 if tr0 + 1 < n_rows else tr0
-# #         dr  = tf - tr0
-
-# #         for c in range(width):
-# #             cf  = (c + 0.5) / tile_size - 0.5
-# #             tc0 = max(0, min(n_cols - 2, int(math.floor(cf))))
-# #             tc1 = tc0 + 1 if tc0 + 1 < n_cols else tc0
-# #             dc  = cf - tc0
-
-# #             t00 = tile_thresh[tr0][tc0]
-# #             t01 = tile_thresh[tr0][tc1]
-# #             t10 = tile_thresh[tr1][tc0]
-# #             t11 = tile_thresh[tr1][tc1]
-
-# #             val = (t00 * (1 - dr) * (1 - dc) +
-# #                    t01 * (1 - dr) *      dc  +
-# #                    t10 *      dr  * (1 - dc) +
-# #                    t11 *      dr  *      dc)
-# #             row.append(val)
-# #         thresh_map.append(row)
-
-# #     return thresh_map
-
-
-# # def _adaptive_binarize(gray, tile_size):
-# #     """
-# #     Binarize using per-pixel interpolated adaptive threshold.
-# #     Returns:
-# #         binary        — 2-D list[list[int]]  0=background, 1=text
-# #         tile_thresh   — 2-D list[list[int]]  raw tile Otsu values
-# #         global_thresh — int                  single global Otsu value
-# #     """
-# #     h, w = len(gray), len(gray[0])
-
-# #     # Global threshold (kept for diagnostics)
-# #     flat          = [gray[r][c] for r in range(h) for c in range(w)]
-# #     global_thresh = _otsu_on_patch(flat)
-
-# #     # Tile thresholds + interpolated map
-# #     tile_thresh = _compute_tile_thresholds(gray, tile_size)
-# #     thresh_map  = _bilinear_interpolate_thresholds(tile_thresh, w, h, tile_size)
-
-# #     binary = [[1 if gray[r][c] < thresh_map[r][c] else 0
-# #                for c in range(w)] for r in range(h)]
-
-# #     return binary, tile_thresh, global_thresh
-
-
-# # # ═══════════════════════════════════════════════════════════════════════════════
-# # # STEP 8 — Morphological opening  (erosion → dilation)
-# # # ═══════════════════════════════════════════════════════════════════════════════
-
-# # def _erode(binary):
-# #     """
-# #     3×3 erosion on a binary image (text=1, bg=0).
-# #     A pixel stays 1 only if ALL 8-neighbours and itself are 1.
-# #     """
-# #     h, w  = len(binary), len(binary[0])
-# #     out   = [[0] * w for _ in range(h)]
-# #     for r in range(1, h - 1):
-# #         for c in range(1, w - 1):
-# #             if (binary[r][c] == 1 and
-# #                     binary[r-1][c-1] and binary[r-1][c] and binary[r-1][c+1] and
-# #                     binary[r  ][c-1] and                    binary[r  ][c+1] and
-# #                     binary[r+1][c-1] and binary[r+1][c] and binary[r+1][c+1]):
-# #                 out[r][c] = 1
-# #     return out
-
-
-# # def _dilate(binary):
-# #     """
-# #     3×3 dilation on a binary image.
-# #     A pixel becomes 1 if ANY of its 8-neighbours or itself is 1.
-# #     """
-# #     h, w  = len(binary), len(binary[0])
-# #     out   = [[0] * w for _ in range(h)]
-# #     for r in range(1, h - 1):
-# #         for c in range(1, w - 1):
-# #             if (binary[r][c] or
-# #                     binary[r-1][c-1] or binary[r-1][c] or binary[r-1][c+1] or
-# #                     binary[r  ][c-1] or                   binary[r  ][c+1] or
-# #                     binary[r+1][c-1] or binary[r+1][c] or binary[r+1][c+1]):
-# #                 out[r][c] = 1
-# #     return out
-
-
-# # def _morphological_opening(binary):
-# #     """
-# #     Opening = erosion followed by dilation.
-# #     Removes isolated speckle pixels while preserving real strokes.
-# #     """
-# #     return _dilate(_erode(binary))
-
-
-# # # ═══════════════════════════════════════════════════════════════════════════════
-# # # PUBLIC ENTRY POINT
-# # # ═══════════════════════════════════════════════════════════════════════════════
-
-# # def preprocess(path, max_dim=2000, tile_size=128, blur_radius=None):
-# #     """
-# #     Run the full preprocessing pipeline on a single image.
-
-# #     Parameters
-# #     ----------
-# #     path        : str   path to any PIL-readable image
-# #     max_dim     : int   clamp largest dimension to this value (None = no resize)
-# #     tile_size   : int   tile side-length for adaptive Otsu (pixels)
-# #     blur_radius : int   Gaussian blur half-width; None = auto (1 for digital, 2 for scanned)
-
-# #     Returns
-# #     -------
-# #     dict with keys:
-# #         gray             — 2-D list[list[int]]   grayscale values 0-255
-# #         binary           — 2-D list[list[int]]   0=background, 1=text (after opening)
-# #         width            — int
-# #         height           — int
-# #         global_threshold — int
-# #         tile_thresholds  — 2-D list[list[int]]
-# #         skew_angle       — float   degrees corrected (0.0 = no correction)
-# #         was_stretched    — bool    True if contrast stretch was applied
-# #     """
-
-# #     # ── Step 1: Load + normalise mode ────────────────────────────────────────
-# #     img = _load_normalised(path)
-
-# #     # ── Step 2: Resize if needed ─────────────────────────────────────────────
-# #     img, _scale = _resize_if_needed(img, max_dim)
-
-# #     # ── Step 3: Grayscale conversion ─────────────────────────────────────────
-# #     gray = _to_grayscale(img)
-# #     height = len(gray)
-# #     width  = len(gray[0])
-
-# #     # ── Step 4: Contrast normalisation (auto-detect) ─────────────────────────
-# #     was_stretched = False
-# #     if _needs_stretch(gray):
-# #         gray          = _stretch_contrast(gray)
-# #         was_stretched = True
-
-# #     # # ── Step 5: Deskew (auto-detect) ─────────────────────────────────────────
-# #     # skew_angle = _detect_skew(gray)
-# #     # if skew_angle != 0.0:
-# #     #     gray = _rotate_gray(gray, skew_angle)
-
-# #     # ── Step 6: Gaussian blur ─────────────────────────────────────────────────
-# #     # Auto radius: scanned/low-contrast images get radius=2, clean digital get radius=1
-# #     if blur_radius is None:
-# #         blur_radius = 2 if was_stretched else 1
-# #     gray_blurred = _gaussian_blur(gray, blur_radius)
-
-# #     # ── Step 7: Adaptive tiled Otsu binarization ─────────────────────────────
-# #     binary, tile_thresholds, global_threshold = _adaptive_binarize(
-# #         gray_blurred, tile_size
-# #     )
-
-# #     # ── Step 8: Morphological opening (speckle removal) ──────────────────────
-# #     binary = _morphological_opening(binary)
-
-# #     return {
-# #         "gray":             gray,
-# #         "binary":           binary,
-# #         "width":            width,
-# #         "height":           height,
-# #         "global_threshold": global_threshold,
-# #         "tile_thresholds":  tile_thresholds,
-# #         # "skew_angle":       skew_angle,
-# #         "was_stretched":    was_stretched,
-# #     }
-# """Image preprocessing utilities: load_grayscale, binarize."""
 # from PIL import Image
 # import math
 
-# def load_grayscale(image_path):
-#     """Load an image and convert to grayscale."""
-#     img = Image.open(image_path).convert("RGB")
-#     width, height = img.size
+
+# # ═══════════════════════════════════════════════════════════════════════════════
+# # STEP 1 — Mode normalisation + loading
+# # ═══════════════════════════════════════════════════════════════════════════════
+
+# def _load_normalised(path):
+#     """Open any PIL-readable image and return a plain RGB PIL Image."""
+#     img  = Image.open(path)
+#     mode = img.mode
+
+#     if mode in ("RGBA", "LA"):
+#         bg = Image.new("RGB", img.size, (255, 255, 255))
+#         if mode == "RGBA":
+#             bg.paste(img, mask=img.split()[3])
+#         else:
+#             bg.paste(img.convert("RGB"))
+#         img = bg
+#     elif mode == "P":
+#         img = img.convert("RGBA").convert("RGB") \
+#             if "transparency" in img.info else img.convert("RGB")
+#     elif mode == "1":
+#         img = img.convert("L").convert("RGB")
+#     elif mode == "L":
+#         img = img.convert("RGB")
+#     elif mode != "RGB":
+#         img = img.convert("RGB")
+
+#     return img
+
+
+# # ═══════════════════════════════════════════════════════════════════════════════
+# # STEP 2 — Grayscale conversion  (BT.601)
+# # ═══════════════════════════════════════════════════════════════════════════════
+
+# def _to_grayscale(img):
+#     """Y = 0.299R + 0.587G + 0.114B → 2-D list[list[int]] (0-255)."""
+#     w, h   = img.size
 #     pixels = list(img.getdata())
-#     gray = []
-#     for r in range(height):
+#     gray   = []
+#     for r in range(h):
 #         row = []
-#         for c in range(width):
-#             R, G, B = pixels[r * width + c]
-#             ##
-#             gray_val = int(0.299 * R + 0.587 * G + 0.114 * B)
-#             row.append(gray_val)
+#         for c in range(w):
+#             R, G, B  = pixels[r * w + c]
+#             row.append(int(0.299 * R + 0.587 * G + 0.114 * B))
 #         gray.append(row)
-#     return gray, width, height
+#     return gray
 
-# # ─────────────────────────────────────────
-# # STAGE 2 — Binarize (Otsu, inverted)
-# # text pixels = 1, background = 0
-# # ─────────────────────────────────────────
 
-# def binarize(image):
-#     """Binarize a grayscale image."""
+# # ═══════════════════════════════════════════════════════════════════════════════
+# # STEP 3 — Contrast normalisation  (histogram stretch)
+# # ═══════════════════════════════════════════════════════════════════════════════
 
-#     h, w  = len(image), len(image[0])
-#     flat  = [image[r][c] for r in range(h) for c in range(w)]
-#     total = h * w
+# def _needs_stretch(gray, low_contrast_threshold=80):
+#     h, w = len(gray), len(gray[0])
+#     flat = sorted(gray[r][c] for r in range(h) for c in range(w))
+#     n    = len(flat)
+#     return (flat[int(0.98 * n)] - flat[int(0.02 * n)]) < low_contrast_threshold
 
-#     max_val   = max(flat) or 1
-#     histogram = [0] * 256
-#     for val in flat:
-#         histogram[int(val * 255 / max_val)] += 1
 
-#     best_t    = 0
-#     best_var  = -1.0
-#     weight_bg = 0
-#     sum_bg    = 0
-#     total_sum = sum(i * histogram[i] for i in range(256))
+# def _stretch_contrast(gray):
+#     h, w  = len(gray), len(gray[0])
+#     flat  = sorted(gray[r][c] for r in range(h) for c in range(w))
+#     n     = len(flat)
+#     lo    = flat[int(0.02 * n)]
+#     hi    = flat[int(0.98 * n)]
+#     if hi == lo:
+#         return [row[:] for row in gray]
+#     scale = 255.0 / (hi - lo)
+#     return [[max(0, min(255, int((gray[r][c] - lo) * scale)))
+#              for c in range(w)] for r in range(h)]
+
+
+# # ═══════════════════════════════════════════════════════════════════════════════
+# # STEP 4 — Gaussian blur  (separable 1-D passes)
+# # ═══════════════════════════════════════════════════════════════════════════════
+
+# def _gaussian_kernel_1d(radius):
+#     if radius == 0:
+#         return [1.0]
+#     sigma  = max(radius / 2.0, 0.5)
+#     kernel = [math.exp(-((i - radius) ** 2) / (2 * sigma ** 2))
+#               for i in range(2 * radius + 1)]
+#     total  = sum(kernel)
+#     return [k / total for k in kernel]
+
+
+# def _convolve_h(image, kernel):
+#     h, w   = len(image), len(image[0])
+#     radius = len(kernel) // 2
+#     out    = []
+#     for r in range(h):
+#         row = []
+#         for c in range(w):
+#             acc = sum(image[r][min(max(c + ki - radius, 0), w - 1)] * kv
+#                       for ki, kv in enumerate(kernel))
+#             row.append(acc)
+#         out.append(row)
+#     return out
+
+
+# def _convolve_v(image, kernel):
+#     h, w   = len(image), len(image[0])
+#     radius = len(kernel) // 2
+#     out    = [[0.0] * w for _ in range(h)]
+#     for r in range(h):
+#         for c in range(w):
+#             out[r][c] = sum(image[min(max(r + ki - radius, 0), h - 1)][c] * kv
+#                             for ki, kv in enumerate(kernel))
+#     return out
+
+
+# def _gaussian_blur(gray, radius):
+#     if radius == 0:
+#         return gray
+#     kernel  = _gaussian_kernel_1d(radius)
+#     tmp     = _convolve_h(gray, kernel)
+#     blurred = _convolve_v(tmp, kernel)
+#     h, w    = len(blurred), len(blurred[0])
+#     return [[int(round(blurred[r][c])) for c in range(w)] for r in range(h)]
+
+
+# # ═══════════════════════════════════════════════════════════════════════════════
+# # STEP 5a — Global Otsu binarization  (exported for standalone use)
+# # ═══════════════════════════════════════════════════════════════════════════════
+
+# def otsu_binarize(gray):
+#     """
+#     Global Otsu binarization.
+
+#     Returns
+#     -------
+#     binary    : 2-D list[list[int]]  (1=ink, 0=background)
+#     threshold : int
+#     """
+#     flat = [p for row in gray for p in row]
+#     hist = [0] * 256
+#     for v in flat:
+#         hist[v] += 1
+
+#     total     = len(flat)
+#     total_sum = sum(i * hist[i] for i in range(256))
+#     sum_bg = weight_bg = 0
+#     best_var = threshold = 0
 
 #     for t in range(256):
-#         weight_bg += histogram[t]
+#         weight_bg += hist[t]
 #         if weight_bg == 0:
 #             continue
 #         weight_fg = total - weight_bg
 #         if weight_fg == 0:
 #             break
-#         sum_bg   += t * histogram[t]
+#         sum_bg   += t * hist[t]
 #         mean_bg   = sum_bg / weight_bg
 #         mean_fg   = (total_sum - sum_bg) / weight_fg
-#         variance  = weight_bg * weight_fg * (mean_bg - mean_fg) ** 2
-#         if variance > best_var:
-#             best_var = variance
+#         var       = weight_bg * weight_fg * (mean_bg - mean_fg) ** 2
+#         if var > best_var:
+#             best_var  = var
+#             threshold = t
+
+#     threshold -= 5  # small bias toward retaining thin strokes
+#     h, w = len(gray), len(gray[0])
+#     binary = [[1 if gray[r][c] < threshold else 0 for c in range(w)]
+#               for r in range(h)]
+#     return binary, threshold
+
+
+# # ═══════════════════════════════════════════════════════════════════════════════
+# # STEP 5b — Adaptive tiled Otsu binarization  (default — better quality)
+# # ═══════════════════════════════════════════════════════════════════════════════
+
+# def _otsu_on_patch(flat_pixels):
+#     """Compute Otsu threshold on a flat list of ints (0-255)."""
+#     total = len(flat_pixels)
+#     if total == 0:
+#         return 128
+#     hist = [0] * 256
+#     for v in flat_pixels:
+#         hist[v] += 1
+#     best_t = best_var = 0
+#     weight_bg = sum_bg = 0
+#     total_sum = sum(i * hist[i] for i in range(256))
+#     for t in range(256):
+#         weight_bg += hist[t]
+#         if weight_bg == 0:
+#             continue
+#         weight_fg = total - weight_bg
+#         if weight_fg == 0:
+#             break
+#         sum_bg += t * hist[t]
+#         mean_bg = sum_bg / weight_bg
+#         mean_fg = (total_sum - sum_bg) / weight_fg
+#         var = weight_bg * weight_fg * (mean_bg - mean_fg) ** 2
+#         if var > best_var:
+#             best_var = var
 #             best_t   = t
+#     return best_t
 
-#     pixel_t = best_t * max_val / 255
-#     return [[1 if image[r][c] < pixel_t else 0
-#              for c in range(w)] for r in range(h)]
 
-# def preprocess(path):
+# def _adaptive_binarize(gray, tile_size=128):
+#     """
+#     Adaptive tiled Otsu binarization with bilinear interpolation.
+
+#     Divides the image into tile_size × tile_size tiles, computes an Otsu
+#     threshold per tile, then bilinear-interpolates back to full resolution.
+#     Much more robust than global Otsu for scanned pages with uneven lighting.
+
+#     Returns
+#     -------
+#     binary        : 2-D list[list[int]]
+#     global_thresh : int   (global Otsu for diagnostics)
+#     """
+#     h, w = len(gray), len(gray[0])
+
+#     # Global threshold kept for diagnostics / fallback
+#     flat_all      = [gray[r][c] for r in range(h) for c in range(w)]
+#     global_thresh = _otsu_on_patch(flat_all)
+
+#     # Per-tile thresholds
+#     n_rows = max(1, (h + tile_size - 1) // tile_size)
+#     n_cols = max(1, (w + tile_size - 1) // tile_size)
+#     tile_thresh = []
+#     for tr in range(n_rows):
+#         row_t = []
+#         r0, r1 = tr * tile_size, min((tr + 1) * tile_size, h)
+#         for tc in range(n_cols):
+#             c0, c1 = tc * tile_size, min((tc + 1) * tile_size, w)
+#             patch  = [gray[r][c] for r in range(r0, r1) for c in range(c0, c1)]
+#             row_t.append(_otsu_on_patch(patch))
+#         tile_thresh.append(row_t)
+
+#     # Bilinear interpolation back to pixel resolution
+#     binary = []
+#     for r in range(h):
+#         row   = []
+#         tf    = (r + 0.5) / tile_size - 0.5
+#         tr0   = max(0, min(n_rows - 2, int(math.floor(tf))))
+#         tr1   = min(tr0 + 1, n_rows - 1)
+#         dr    = tf - tr0
+#         for c in range(w):
+#             cf  = (c + 0.5) / tile_size - 0.5
+#             tc0 = max(0, min(n_cols - 2, int(math.floor(cf))))
+#             tc1 = min(tc0 + 1, n_cols - 1)
+#             dc  = cf - tc0
+#             t00 = tile_thresh[tr0][tc0]
+#             t01 = tile_thresh[tr0][tc1]
+#             t10 = tile_thresh[tr1][tc0]
+#             t11 = tile_thresh[tr1][tc1]
+#             thr = (t00 * (1-dr) * (1-dc) + t01 * (1-dr) * dc +
+#                    t10 * dr     * (1-dc) + t11 * dr     * dc)
+#             row.append(1 if gray[r][c] < thr else 0)
+#         binary.append(row)
+
+#     return binary, global_thresh
+
+
+# # ═══════════════════════════════════════════════════════════════════════════════
+# # STEP 6 — Morphological operations
+# # ═══════════════════════════════════════════════════════════════════════════════
+
+# def _erode(binary):
+#     h, w = len(binary), len(binary[0])
+#     out  = [[0] * w for _ in range(h)]
+#     for r in range(1, h - 1):
+#         for c in range(1, w - 1):
+#             if (binary[r][c] and
+#                     binary[r-1][c-1] and binary[r-1][c] and binary[r-1][c+1] and
+#                     binary[r  ][c-1] and                    binary[r  ][c+1] and
+#                     binary[r+1][c-1] and binary[r+1][c] and binary[r+1][c+1]):
+#                 out[r][c] = 1
+#     return out
+
+
+# def _dilate(binary):
+#     h, w = len(binary), len(binary[0])
+#     out  = [[0] * w for _ in range(h)]
+#     for r in range(1, h - 1):
+#         for c in range(1, w - 1):
+#             if (binary[r][c] or
+#                     binary[r-1][c-1] or binary[r-1][c] or binary[r-1][c+1] or
+#                     binary[r  ][c-1] or                   binary[r  ][c+1] or
+#                     binary[r+1][c-1] or binary[r+1][c] or binary[r+1][c+1]):
+#                 out[r][c] = 1
+#     return out
+
+
+# def _morphological_opening(binary):
+#     """Erosion → dilation. Removes isolated speckle pixels."""
+#     return _dilate(_erode(binary))
+
+
+# def _morphological_closing(binary):
+#     """Dilation → erosion. Reconnects broken strokes."""
+#     return _erode(_dilate(binary))
+
+
+# # ═══════════════════════════════════════════════════════════════════════════════
+# # PUBLIC ENTRY POINT
+# # ═══════════════════════════════════════════════════════════════════════════════
+
+# def preprocess(path, gaussian_noise=False, negative_noise=False,
+#                unconnected=False, tile_size=128):
 #     """
 #     Run the full preprocessing pipeline on a single image.
 
 #     Parameters
 #     ----------
-#     path        : str   path to any PIL-readable image
+#     path            : str   path to any PIL-readable image
+#     gaussian_noise  : bool  apply Gaussian blur before binarization
+#                             (use for scanned images with Gaussian noise)
+#     negative_noise  : bool  apply morphological opening after binarization
+#                             (use for images with salt/pepper speckle noise)
+#     unconnected     : bool  apply morphological closing after binarization
+#                             (use for images with broken/disconnected strokes)
+#     tile_size       : int   tile side-length for adaptive Otsu (default 128)
 
 #     Returns
 #     -------
-#     dict with keys:
+#     dict:
 #         gray             — 2-D list[list[int]]   grayscale values 0-255
-#         binary           — 2-D list[list[int]]   0=background, 1=text (after opening)
+#         binary           — 2-D list[list[int]]   0=background, 1=text
 #         width            — int
 #         height           — int
+#         global_threshold — int    global Otsu threshold (diagnostics)
+#         was_stretched    — bool   True if contrast stretch was applied
 #     """
+#     # Step 1: Load
+#     img    = _load_normalised(path)
+#     gray   = _to_grayscale(img)
+#     height = len(gray)
+#     width  = len(gray[0])
 
+#     # Step 2: Contrast normalisation
+#     was_stretched = False
+#     if _needs_stretch(gray):
+#         gray          = _stretch_contrast(gray)
+#         was_stretched = True
 
-#     gray,width,height  = load_grayscale(path)
+#     # Step 3: Optional Gaussian blur
+#     if gaussian_noise:
+#         blur_radius = 2 if was_stretched else 1
+#         gray        = _gaussian_blur(gray, blur_radius)
 
+#     # Step 4: Adaptive tiled Otsu binarization (better than global for documents)
+#     binary, global_threshold = _adaptive_binarize(gray, tile_size=tile_size)
 
-#     binary = binarize(gray)
+#     # Step 5: Optional morphological cleanup
+#     if negative_noise:
+#         binary = _morphological_opening(binary)   # remove speckle
+#     if unconnected:
+#         binary = _morphological_closing(binary)   # reconnect broken strokes
 
 #     return {
 #         "gray":             gray,
 #         "binary":           binary,
 #         "width":            width,
 #         "height":           height,
+#         "global_threshold": global_threshold,
+#         "was_stretched":    was_stretched,
 #     }
+
 
 """
 preprocessing.py  [merged]
@@ -765,7 +454,16 @@ def _to_grayscale(img):
 # STEP 3 — Contrast normalisation  (histogram stretch)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _needs_stretch(gray, low_contrast_threshold=80):
+def _needs_stretch(gray, low_contrast_threshold=120):
+    """
+    Return True if the image needs contrast stretching.
+
+    Threshold raised from 80 → 120 to catch phone photos and lightly
+    faded prints whose dynamic range sits in the 80-120 band. Their
+    compressed contrast causes thin equation strokes (fraction bars,
+    superscript dots) to sit very close to the binarization boundary,
+    which hurts detection accuracy even though the image looks fine visually.
+    """
     h, w = len(gray), len(gray[0])
     flat = sorted(gray[r][c] for r in range(h) for c in range(w))
     n    = len(flat)
@@ -883,8 +581,21 @@ def otsu_binarize(gray):
 # STEP 5b — Adaptive tiled Otsu binarization  (default — better quality)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _otsu_on_patch(flat_pixels):
-    """Compute Otsu threshold on a flat list of ints (0-255)."""
+def _otsu_on_patch(flat_pixels, clamp_threshold=None):
+    """
+    Compute Otsu threshold on a flat list of ints (0-255).
+
+    Fix 1 — Thin-tile clamping:
+    Tiles that are mostly background (wide margins, whitespace blocks around
+    equations) produce inflated thresholds (e.g. 210) that bleed into
+    adjacent equation tiles via bilinear interpolation, causing thin strokes
+    like fraction bars and superscript dots to be classified as background.
+
+    When clamp_threshold is provided (the global Otsu value), any tile whose
+    ink ratio is below 3% is clamped to min(tile_threshold, clamp_threshold).
+    This prevents margin tiles from contaminating the interpolated threshold
+    map near equation regions.
+    """
     total = len(flat_pixels)
     if total == 0:
         return 128
@@ -908,6 +619,15 @@ def _otsu_on_patch(flat_pixels):
         if var > best_var:
             best_var = var
             best_t   = t
+
+    # Fix 1: clamp whitespace-dominated tiles
+    if clamp_threshold is not None:
+        # Count dark pixels (potential ink) — below 128
+        dark_pixels = sum(hist[v] for v in range(128))
+        ink_ratio   = dark_pixels / total
+        if ink_ratio < 0.03:          # tile is >97% background
+            best_t = min(best_t, clamp_threshold)
+
     return best_t
 
 
@@ -915,9 +635,16 @@ def _adaptive_binarize(gray, tile_size=128):
     """
     Adaptive tiled Otsu binarization with bilinear interpolation.
 
-    Divides the image into tile_size × tile_size tiles, computes an Otsu
+    Divides the image into tile_size x tile_size tiles, computes an Otsu
     threshold per tile, then bilinear-interpolates back to full resolution.
     Much more robust than global Otsu for scanned pages with uneven lighting.
+
+    Fix 1: passes global_thresh to each tile's _otsu_on_patch so whitespace
+    tiles are clamped and cannot bleed inflated thresholds into equation areas.
+
+    Fix 2: applies a -5 thin-stroke bias to the final per-pixel threshold,
+    matching the global otsu_binarize() path and preserving thin elements
+    (fraction bars, superscript dots, integral signs) that sit near the boundary.
 
     Returns
     -------
@@ -926,11 +653,12 @@ def _adaptive_binarize(gray, tile_size=128):
     """
     h, w = len(gray), len(gray[0])
 
-    # Global threshold kept for diagnostics / fallback
+    # Global threshold — used for diagnostics AND as the clamp ceiling
+    # for whitespace-dominated tiles (Fix 1)
     flat_all      = [gray[r][c] for r in range(h) for c in range(w)]
     global_thresh = _otsu_on_patch(flat_all)
 
-    # Per-tile thresholds
+    # Per-tile thresholds — pass global_thresh for whitespace clamping
     n_rows = max(1, (h + tile_size - 1) // tile_size)
     n_cols = max(1, (w + tile_size - 1) // tile_size)
     tile_thresh = []
@@ -940,10 +668,17 @@ def _adaptive_binarize(gray, tile_size=128):
         for tc in range(n_cols):
             c0, c1 = tc * tile_size, min((tc + 1) * tile_size, w)
             patch  = [gray[r][c] for r in range(r0, r1) for c in range(c0, c1)]
-            row_t.append(_otsu_on_patch(patch))
+            row_t.append(_otsu_on_patch(patch, clamp_threshold=global_thresh))
         tile_thresh.append(row_t)
 
     # Bilinear interpolation back to pixel resolution
+    # Fix 2: apply +5 thin-stroke bias so the adaptive path preserves the
+    # same thin elements that the global path preserves.
+    # Logic: global otsu does threshold -= 5, which lowers the bar so more
+    # pixels (including thin strokes just above the original threshold) are
+    # classified as ink. Equivalent in adaptive: raise the comparison value
+    # by 5 (gray < thr + 5), catching those same borderline pixels.
+    THIN_STROKE_BIAS = 5
     binary = []
     for r in range(h):
         row   = []
@@ -962,7 +697,7 @@ def _adaptive_binarize(gray, tile_size=128):
             t11 = tile_thresh[tr1][tc1]
             thr = (t00 * (1-dr) * (1-dc) + t01 * (1-dr) * dc +
                    t10 * dr     * (1-dc) + t11 * dr     * dc)
-            row.append(1 if gray[r][c] < thr else 0)
+            row.append(1 if gray[r][c] < thr + THIN_STROKE_BIAS else 0)
         binary.append(row)
 
     return binary, global_thresh
@@ -1012,21 +747,75 @@ def _morphological_closing(binary):
 # PUBLIC ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _auto_tile_size(width, height):
+    """
+    Fix 3 — Auto tile size based on image resolution.
+
+    tile_size=128 is well-suited to 300 DPI documents where 12pt body text
+    is ~50px tall (128px = ~2.5 lines). At lower resolutions (phone photos,
+    72-150 DPI) body text is 10-25px tall and 128px spans 5-12 lines,
+    mixing dense text and equation whitespace in the same tile and producing
+    a threshold calibrated for text density — which hurts thin equation strokes.
+
+    Strategy: target ~2-3 text lines per tile. We estimate a rough font size
+    from the image height (A4 page assumption: ~50 text lines) and set tile
+    size to 3x the estimated line height, clamped to a safe range.
+
+    Result:
+      300 DPI A4 (~3508px tall) → font ~47px → tile 96px  (was 128)
+      150 DPI A4 (~1754px tall) → font ~23px → tile 48px  (was 128)
+       72 DPI A4 ( ~842px tall) → font ~11px → tile 32px  (was 128)
+    """
+    estimated_font_px = height / 74.0   # A4 at any DPI: ~50 lines × 1.5 spacing
+    raw_tile = int(estimated_font_px * 3)
+    # Clamp: min 32 (very low-res), max 128 (high-res / standard)
+    return max(32, min(128, raw_tile))
+
+
+def _resize_if_needed(img, max_dim):
+    """
+    Fix 5 — Downscale large images to prevent slow processing.
+
+    Very high-res scans (600 DPI A4 = 4960×7016) make every preprocessing
+    step proportionally slower without improving detection quality, since
+    the CCA and scoring stages operate on blobs whose features (height,
+    width, area) are all relative to font_size. Clamping to max_dim=2000px
+    keeps the longest dimension manageable while preserving all structural
+    information needed for equation detection.
+
+    Returns (img, was_resized: bool).
+    """
+    if max_dim is None:
+        return img, False
+    w, h = img.size
+    if max(w, h) <= max_dim:
+        return img, False
+    scale = max_dim / max(w, h)
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
+    return img.resize((new_w, new_h), Image.LANCZOS), True
+
+
 def preprocess(path, gaussian_noise=False, negative_noise=False,
-               unconnected=False, tile_size=128):
+               unconnected=False, tile_size=None, max_dim=2000):
     """
     Run the full preprocessing pipeline on a single image.
 
     Parameters
     ----------
-    path            : str   path to any PIL-readable image
-    gaussian_noise  : bool  apply Gaussian blur before binarization
-                            (use for scanned images with Gaussian noise)
-    negative_noise  : bool  apply morphological opening after binarization
-                            (use for images with salt/pepper speckle noise)
-    unconnected     : bool  apply morphological closing after binarization
-                            (use for images with broken/disconnected strokes)
-    tile_size       : int   tile side-length for adaptive Otsu (default 128)
+    path            : str        path to any PIL-readable image
+    gaussian_noise  : bool       apply Gaussian blur before binarization
+                                 (use for scanned images with Gaussian noise)
+    negative_noise  : bool       apply morphological opening after binarization
+                                 (use for images with salt/pepper speckle noise)
+    unconnected     : bool       apply morphological closing after binarization
+                                 (use for images with broken/disconnected strokes)
+    tile_size       : int|None   tile side-length for adaptive Otsu.
+                                 None (default) = auto-select based on image height
+                                 (Fix 3: smaller tiles for low-DPI images)
+    max_dim         : int|None   clamp the longest image dimension to this value
+                                 before processing (Fix 5).  None = no resize.
+                                 Default 2000px — safe for all standard DPIs.
 
     Returns
     -------
@@ -1038,13 +827,13 @@ def preprocess(path, gaussian_noise=False, negative_noise=False,
         global_threshold — int    global Otsu threshold (diagnostics)
         was_stretched    — bool   True if contrast stretch was applied
     """
-    # Step 1: Load
-    img    = _load_normalised(path)
+    # Step 1: Load + optional downscale (Fix 5)
+    img, _was_resized = _resize_if_needed(_load_normalised(path), max_dim)
     gray   = _to_grayscale(img)
     height = len(gray)
     width  = len(gray[0])
 
-    # Step 2: Contrast normalisation
+    # Step 2: Contrast normalisation (Fix 4: wider threshold catches phone photos)
     was_stretched = False
     if _needs_stretch(gray):
         gray          = _stretch_contrast(gray)
@@ -1055,8 +844,12 @@ def preprocess(path, gaussian_noise=False, negative_noise=False,
         blur_radius = 2 if was_stretched else 1
         gray        = _gaussian_blur(gray, blur_radius)
 
-    # Step 4: Adaptive tiled Otsu binarization (better than global for documents)
-    binary, global_threshold = _adaptive_binarize(gray, tile_size=tile_size)
+    # Step 4: Adaptive tiled Otsu binarization
+    # Fix 3: auto tile size if not specified by caller
+    effective_tile = tile_size if tile_size is not None else _auto_tile_size(width, height)
+    print(f"      tile_size={effective_tile}px  "
+          f"({'auto' if tile_size is None else 'caller-set'})")
+    binary, global_threshold = _adaptive_binarize(gray, tile_size=effective_tile)
 
     # Step 5: Optional morphological cleanup
     if negative_noise:
