@@ -33,6 +33,7 @@ for _p in (_HERE, _ROOT):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from pipeline.frame_line_detector import filter_line_blobs
 from region_grouping import group_blobs_into_regions
 from preprocessing        import preprocess
 from blob_analysis        import run_blob_analysis
@@ -130,12 +131,15 @@ def run_cca_pipeline(image_path,
     )
     print(f"      → {doc_type.upper()}  (conf={dt_conf:.0%})")
 
-
+    filter_res= filter_line_blobs(blobs, width, height, font_size)
+    blobs=filter_res["clean_blobs"]
+    rejcted=filter_res["rejected_blobs"]
+    reasons=filter_res["rejection_reasons"]
+    print(f"      blobs rejected={len(rejcted)}  reasons={reasons}  ")
     # ── Pass 1 — Standalone equations ─────────────────────────────────────────
     print("[4/5] Pass 1 — standalone equation classification...")
-    regions =group_blobs_into_regions(blobs, font_size
-                                        ,h_gap_factor=2.0,
-                                        line_v_factor=0.6,   
+    regions =group_blobs_into_regions(blobs, font_size,
+                              h_gap_factor=2.3, line_v_factor=0.6,   
                                         para_v_factor=None)
 
     eq_results_p1 = detect_standalone_equations(
