@@ -17,17 +17,17 @@ _DENSITY_CFG = {
         frac_bar_h_factor     = 0.22,
         frac_bar_score        = 4,
         tall_sym_threshold    = 0.02,
-        tall_sym_score        = 3,
+        tall_sym_score        = 4,
         cv_h_low              = 0.35,
         cv_h_high             = 0.80,
         outlier_low           = 0.08,
         outlier_high          = 0.25,
-        height_ratio_min      = 1.5,
-        region_ar_bonus       = 4.0,
-        single_line_body_ratio= 0.40,
+        height_ratio_min      = 1.2,
+        region_ar_bonus       = 2.0,
+        single_line_body_ratio= 0.70,
         small_blob_max        = 14,
         small_h_ratio_max     = 1.5,
-        wide_uniform_ar       = 10,
+        wide_uniform_ar       = 3,
         para_h_ratio          = 5.0,
         para_cv_h             = 0.65,
         font_size_small       = 10,
@@ -35,7 +35,7 @@ _DENSITY_CFG = {
     1: dict(
         # Medium density — balanced defaults
         score_threshold       = 5,
-        confidence_cutoff     = 0.25,
+        confidence_cutoff     = 0.4,
         frac_bar_w_factor     = 1.0,
         frac_bar_h_factor     = 0.20,
         frac_bar_score        = 3,
@@ -43,14 +43,14 @@ _DENSITY_CFG = {
         tall_sym_score        = 2,
         cv_h_low              = 0.50,
         cv_h_high             = 1.00,
-        outlier_low           = 0.10,
-        outlier_high          = 0.30,
+        outlier_low           = 0.05,
+        outlier_high          = 0.50,
         height_ratio_min      = 1.8,
         region_ar_bonus       = 3.0,
         single_line_body_ratio= 0.60,
         small_blob_max        = 12,
         small_h_ratio_max     = 1.7,
-        wide_uniform_ar       = 8,
+        wide_uniform_ar       = 3,
         para_h_ratio          = 4.0,
         para_cv_h             = 0.55,
         font_size_small       = 12,
@@ -73,7 +73,7 @@ _DENSITY_CFG = {
         single_line_body_ratio= 0.60,
         small_blob_max        = 10,
         small_h_ratio_max     = 1.9,
-        wide_uniform_ar       = 7,
+        wide_uniform_ar       = 3,
         para_h_ratio          = 3.5,
         para_cv_h             = 0.50,
         font_size_small       = 14,
@@ -249,7 +249,7 @@ def detect_standalone_equations(regions, font_size, img_height,
         if cv_ar > 0.8:                           score += 1
         if outlier_ratio > cfg["outlier_low"]:   score += 2
         if outlier_ratio > cfg["outlier_high"]:  score += 3
-        if blobs_per_lh < 6:                      score += 3
+        if blobs_per_lh < 4:                      score += 3
         elif blobs_per_lh < 12:                   score += 1
         if height_ratio > cfg["height_ratio_min"]: score += 1
         if region_ar < cfg["region_ar_bonus"]:   score += 1
@@ -267,7 +267,7 @@ def detect_standalone_equations(regions, font_size, img_height,
 
         # Penalties
         if cv_h < 0.2 and height_ratio < 1.3:         score -= 3
-        if region_ar > 10 and h < font_size * 1.3:    score -= 4
+        if region_ar > 8 and h < font_size * 1.3:    score -= 4
         if center_span < 0.7:                          score -= 2
         if body_ratio > 0.7 and height_ratio < 1.6:   score -= 2
         if band_ratio > 0.7 and height_ratio < 1.6:   score -= 1
@@ -291,7 +291,7 @@ def detect_standalone_equations(regions, font_size, img_height,
             score = -99
 
         # Single wide text line
-        if (region_ar > 6 and height_ratio < 1.5
+        if (region_ar > 4 and height_ratio < 1.5
                 and center_span < 0.9
                 and body_ratio > cfg["single_line_body_ratio"]):
             score = -99
@@ -312,7 +312,7 @@ def detect_standalone_equations(regions, font_size, img_height,
         # Multi-line paragraph block
         if (height_ratio > cfg["para_h_ratio"]
                 and cv_h < cfg["para_cv_h"]
-                and outlier_ratio < 0.15 and body_ratio > 0.45):
+                and outlier_ratio < 0.10 and body_ratio > 0.45):
             score = -99
 
         # Tall paragraph block

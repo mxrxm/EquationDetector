@@ -101,19 +101,21 @@ def run_cca_pipeline(image_path,
     label = _DENSITY_LABELS[density_class]
     print(f"      → class {density_class} ({label})  conf={dt_conf:.0%}")
 
-    filter_res = filter_line_blobs(blobs, width, height, font_size)
+    filter_res = filter_line_blobs(blobs, width, height, font_size,line_span_factor=0.10)
     blobs      = filter_res["clean_blobs"]
     print(f"      blobs rejected={len(filter_res['rejected_blobs'])}")
     
 
-
+    line_v_factor = {0: 0.8, 1: 0.7, 2: 0.5}.get(density_class)
+    h_gap_factor = {0: 2.4, 1:2.2 , 2: 1.8}.get(density_class)
     # ── Stage 4 — Region grouping + standalone equation detection ─────────────
     print("[4/4] Standalone equation classification...")
     regions = group_blobs_into_regions(
         blobs, font_size,
-        h_gap_factor=2.3,
-        line_v_factor=0.6,
+        h_gap_factor=h_gap_factor,
+        line_v_factor=line_v_factor,
         para_v_factor=None,
+        min_blobs_per_region=1,
     )
 
     eq_results = detect_standalone_equations(

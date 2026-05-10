@@ -849,7 +849,9 @@ def preprocess(path, gaussian_noise=False, negative_noise=False,
     effective_tile = tile_size if tile_size is not None else _auto_tile_size(width, height)
     print(f"      tile_size={effective_tile}px  "
           f"({'auto' if tile_size is None else 'caller-set'})")
+    # binary, global_threshold = _adaptive_binarize(gray, tile_size=effective_tile)
     binary, global_threshold = _adaptive_binarize(gray, tile_size=effective_tile)
+
 
     # Step 5: Optional morphological cleanup
     if negative_noise:

@@ -35,7 +35,7 @@ THIN_AXIS_FONT_FACTOR: float = 0.6
 
 # A blob is "long" enough to be a line if its long axis spans this fraction
 # of the corresponding image dimension
-LINE_SPAN_FACTOR: float = 0.40          # 40 % of image width/height
+LINE_SPAN_FACTOR: float = 0.15          # 40 % of image width/height
 
 # Frame detection: a blob that hugs a page edge within this many pixels of the
 # image border is treated as a frame stroke even if it is thicker than a line

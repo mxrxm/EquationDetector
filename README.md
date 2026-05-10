@@ -1,6 +1,14 @@
 # Equation Detector
 
-A from-scratch mathematical equation localization system for document images — no OpenCV, no NumPy. Built entirely on connected component analysis (CCA), Edge Detection ,blob statistics, and multi-pass scoring.
+A from-scratch mathematical equation localization system for document images — no OpenCV, no NumPy. Built entirely on connected component analysis (CCA), blob statistics, and multi-pass scoring.
+
+---
+
+## Demo
+
+![Equation detection on a control systems assignment sheet](demo.png)
+
+*Red boxes = standalone/display equations (class 0) with confidence scores. The pipeline correctly isolates transfer functions, the block diagram, and the feedback expression while ignoring question text and bullet points.*
 
 ---
 
@@ -8,17 +16,15 @@ A from-scratch mathematical equation localization system for document images —
 
 Given a document image (research paper, textbook, assignment sheet, lecture slide), the pipeline:
 
-1. Binarizes the image using Otsu thresholding
-2. Finds every ink blob via connected component analysis
-3. Estimates font size from the modal blob height
-4. Detects document type (dense vs sparse)
-5. Groups blobs into candidate regions
-6. Classifies standalone equations (Pass 1)
-7. Scans text regions for inline equations (Pass 2, dense docs only)
-8. Outputs annotated images + a CSV of bounding boxes with confidence scores
+1. Preprocesses the image — background normalization, contrast stretch, Otsu binarization
+2. Finds every ink blob via connected component analysis (BFS, 8-connected)
+3. Estimates font size from the modal blob height distribution
+4. Detects document density class (sparse / medium / dense)
+5. Filters structural lines — table grids, page borders, section rules
+6. Groups blobs into candidate regions using two-pass Union-Find
+7. Classifies standalone equations (Pass 1) with density-aware scoring
+8. Outputs annotated images and a CSV of bounding boxes with confidence scores
 
-**Class 0** = standalone/display equation (red boxes)  
-**Class 1** = inline equation within a text line (blue boxes)
 
 ---
 
@@ -27,6 +33,8 @@ Given a document image (research paper, textbook, assignment sheet, lecture slid
 ```bash
 pip install -r requirements.txt
 ```
+
+`requirements.txt` contains only: `Pillow`, `matplotlib`, `streamlit`, `pandas`
 
 ---
 
@@ -47,13 +55,15 @@ run.bat path\to\image.png results\
 from pipeline.pipeline import run_cca_pipeline
 
 gray, binary, blobs, font_size, text_boxes, eq_results = run_cca_pipeline(
-    "paper.png", debug=False
+    "paper.png",
+    debug=False
 )
 
 ```
 
 
-## CSV format
+
+## Output CSV format
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -64,43 +74,33 @@ gray, binary, blobs, font_size, text_boxes, eq_results = run_cca_pipeline(
 | class | int | 0 = standalone, 1 = inline |
 | confidence | float | Score normalized to [0, 1] |
 
----
-
-## How it works
-
-### Document type detection
-The pipeline classifies documents as **dense** (research papers, textbooks) or **sparse** (assignment sheets, slides) based on ink density, body blob ratio, and blobs-per-line. Only dense documents run Pass 2.
-
-### Pass 1 — Standalone equations
-Regions are scored on: blob height variance (`cv_h`), aspect ratio variance (`cv_ar`), outlier blob ratio (fraction bars, tall symbols), region height relative to font size, and center span. Hard guards reject single-line text, headings, and uniform paragraphs.
-
-### Pass 2 — Inline equations (dense docs only)
-Each text region is split into lines, then lines into word-level clusters. Each cluster is scored for: fraction bars, tall symbols (height > 1.8× font), tiny blobs (height < 0.4× font, i.e. superscripts), and height variance. A cluster fires as an inline equation only if it scores significantly above the baseline of its neighbouring clusters on the same line — this prevents normal text from accumulating soft scores.
-
-### No external CV libraries
-All image processing is implemented from scratch in pure Python: Gaussian blur, Sobel edges, Otsu binarization, BFS flood fill, and Union-Find region grouping.
-
----
 
 ## Tuning
 
+### Grouping
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `line_v_factor` | 1.2 | Vertical gap for within-line blob merging |
+| `para_v_factor` | auto | Vertical gap for paragraph merging (auto-detected) |
+| `h_gap_factor` | 2.0 | Horizontal proximity tolerance |
+
+### Standalone detection
 | Parameter | Location | Effect |
 |-----------|----------|--------|
-| `confidence <= 0.3` | `standalone_equations.py` | Min confidence for standalone detection |
-| `score >= 3.5` | `inline_equations.py` | Min score for inline cluster |
-| `score_delta >= 4.0` | `inline_equations.py` | How anomalous vs line baseline |
-| `baseline < 1.0` | `inline_equations.py` | Rest of line must look like text |
-| `len > 20` | `inline_equations.py` | Max blobs per cluster (kills full lines) |
-| `class1_threshold` | `app.py` / `plot_csv.py` | Post-hoc inline filtering via CSV |
+| `score_threshold` | `standalone_equations.py` cfg | Min score to pass (per density class) |
+| `conf_cutoff` | `standalone_equations.py` cfg | Min confidence to keep |
+| `frac_w / frac_h` | `standalone_equations.py` cfg | Fraction bar detection thresholds |
+
 
 ---
 
 ## Limitations
 
-- Handwritten documents: not supported (blob size distribution is too irregular for font-size estimation)
-- Very low resolution scans (< 100 DPI): Otsu binarization degrades
-- Colored backgrounds: grayscale conversion may lose contrast
-- 2-column layouts: grouping sometimes merges across columns; reduce `h_gap_factor`
+- **Handwritten documents** — not supported. Blob size distribution is too irregular for reliable font-size estimation.
+- **Very low resolution** (< 100 DPI) — Otsu binarization degrades; edges become too thin to detect reliably.
+- **Two-column layouts** — grouping occasionally merges across columns. Reduce `h_gap_factor` to 1.5 if this occurs.
+- **Tables** — table cell contents can score as equations if the line filter does not remove grid lines. Ensure `filter_line_blobs` is called before grouping.
+- **Colored backgrounds** — handled by background normalization, but very saturated colors (dark red, dark blue) may still compress the grayscale range.
 
 ---
 
