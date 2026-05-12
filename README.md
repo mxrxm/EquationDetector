@@ -31,7 +31,7 @@ Given a document image (research paper, textbook, assignment sheet, lecture slid
 ## Installation
 
 ```bash
-pip install -r requirements.txt
+pip install -r requierments.txt
 ```
 
 `requirements.txt` contains only: `Pillow`, `matplotlib`, `streamlit`, `pandas`
